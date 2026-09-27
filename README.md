@@ -58,29 +58,79 @@ ambient-kiosk/
 
 ---
 
-## Prerequisites
+## Prerequisites & Cross-Platform Build Guide
 
-* **Rust & Cargo**: >= 1.78 (`rustc --version`)
+* **Rust & Cargo**: >= 1.90 (`rustc --version`)
 * **Bun**: >= 1.0 (`bun --version`) or Node.js >= 20
-* **OS Dependencies**:
-  * macOS: Xcode Command Line Tools
-  * Linux: `webkit2gtk-4.1`, `libssl-dev`, `libgtk-3-dev`
-  * Windows: Microsoft Edge WebView2 runtime (preinstalled on Windows 10/11)
+* **Official Reference**: Consult the [Tauri v2 Prerequisites Guide](https://v2.tauri.app/start/prerequisites/) for official distribution setup details.
 
+### OS-Specific Build Requirements:
+
+* **macOS**:
+  * Xcode Command Line Tools: `xcode-select --install`
+  * Runtime Engine: Native WKWebView (macOS 14+ required for native webview loopback proxying).
+
+* **Linux (Ubuntu / Debian / Fedora / Arch)**:
+  * Ubuntu / Debian:
+    ```bash
+    sudo apt update
+    sudo apt install libwebkit2gtk-4.1-dev \
+      build-essential \
+      curl \
+      wget \
+      file \
+      libxdo-dev \
+      libssl-dev \
+      libayatana-appindicator3-dev \
+      librsvg2-dev
+    ```
+  * Fedora:
+    ```bash
+    sudo dnf install webkit2gtk4.1-devel \
+      openssl-devel \
+      curl \
+      wget \
+      file \
+      libappindicator-gtk3-devel \
+      librsvg2-devel
+    ```
+  * Arch Linux:
+    ```bash
+    sudo pacman -S webkit2gtk-4.1 \
+      base-devel \
+      curl \
+      wget \
+      file \
+      openssl \
+      libappindicator-gtk3 \
+      librsvg
+    ```
+  * Runtime Engine: WebKitGTK 4.1.
+* **Windows**:
+  * Microsoft Visual Studio C++ Build Tools (MSVC) with Windows 10/11 SDK.
+  * Microsoft Edge WebView2 runtime (pre-installed on Windows 10/11).
+  * Runtime Engine: WebView2 (Chromium).
+
+---
+
+## Building & Running
+
+### 1. Install Frontend Dependencies
+```bash
+bun install
+```
+
+### 2. Development Mode (with Live Reload)
+```bash
+bun run tauri dev
+```
+
+### 3. Production Release Build
+```bash
+bun run tauri build
+```
 ---
 
 ## License
 
-Copyright (c) 2026 @thejjw
-
-This software is provided 'as-is', without any express or implied warranty. In no event will the authors be held liable for any damages arising from the use of this software.
-
-Permission is granted to anyone to use this software for any purpose, including commercial applications, and to alter it and redistribute it freely, subject to the following restrictions:
-
-1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software. If you use this software in a product, an acknowledgment (see the following) in the product documentation is required.
-
-     Portions Copyright (c) 2026 @thejjw
-
-2. Altered versions must be plainly marked as such, and must not be misrepresented as being the original software.
-
-3. This notice may not be removed or altered from any distribution.
+This project is licensed under the terms described in the [LICENSE](LICENSE) file.
