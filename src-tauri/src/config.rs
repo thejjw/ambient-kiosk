@@ -299,40 +299,68 @@ pub fn find_portable_config_path(exe_path: &Path) -> Option<PathBuf> {
 /// 2. Portable config adjacent to bundle/exe (read-only)
 /// 3. User Application Support directory (writable)
 /// 4. Compiled defaults
+/// System safety ceiling for resident webviews.
+pub const MAX_ALLOWED_RESIDENT_WEBVIEWS: usize = 16;
+
+/// Validates kiosk configuration against runtime safety invariants:
+/// 1. max_resident_webviews <= 16
+/// 2. endpoints.len() <= max_resident_webviews
+/// 3. endpoints.len() >= 1
+pub fn validate_kiosk_config(config: &KioskConfig) -> Result<(), String> {
+    if config.limits.max_resident_webviews > MAX_ALLOWED_RESIDENT_WEBVIEWS {
+        return Err(format!(
+            "Configuration error: max_resident_webviews ({}) exceeds system safety ceiling ({}).",
+            config.limits.max_resident_webviews, MAX_ALLOWED_RESIDENT_WEBVIEWS
+        ));
+    }
+
+    if config.endpoints.len() > config.limits.max_resident_webviews {
+        return Err("Endpoint count exceeds max_resident_webviews limit.".into());
+    }
+
+    if config.endpoints.is_empty() {
+        return Err("Configuration error: at least one endpoint must be configured.".into());
+    }
+
+    Ok(())
+}
+
 pub fn resolve_configuration(
     cli_arg: Option<&Path>,
     exe_path: Option<&Path>,
     app_data_dir: &Path,
-) -> ConfigMetaResponse {
+) -> Result<ConfigMetaResponse, String> {
     // Level 1: CLI / Environment override
     if let Some(p) = cli_arg {
         if p.is_file() {
-            if let Ok(content) = fs::read_to_string(p) {
-                if let Ok(config) = serde_json::from_str::<KioskConfig>(&content) {
-                    return ConfigMetaResponse {
-                        config,
-                        source: ConfigSource::Cli,
-                        is_readonly: true,
-                        resolved_path: p.to_string_lossy().to_string(),
-                    };
-                }
-            }
+            let content = fs::read_to_string(p)
+                .map_err(|e| format!("Failed to read CLI config at '{}': {}", p.display(), e))?;
+            let config: KioskConfig = serde_json::from_str(&content)
+                .map_err(|e| format!("Failed to parse CLI config at '{}': {}", p.display(), e))?;
+            validate_kiosk_config(&config)?;
+            return Ok(ConfigMetaResponse {
+                config,
+                source: ConfigSource::Cli,
+                is_readonly: true,
+                resolved_path: p.to_string_lossy().to_string(),
+            });
         }
     }
 
     if let Ok(env_path) = std::env::var("KIOSK_CONFIG") {
         let p = PathBuf::from(env_path);
         if p.is_file() {
-            if let Ok(content) = fs::read_to_string(&p) {
-                if let Ok(config) = serde_json::from_str::<KioskConfig>(&content) {
-                    return ConfigMetaResponse {
-                        config,
-                        source: ConfigSource::Cli,
-                        is_readonly: true,
-                        resolved_path: p.to_string_lossy().to_string(),
-                    };
-                }
-            }
+            let content = fs::read_to_string(&p)
+                .map_err(|e| format!("Failed to read KIOSK_CONFIG at '{}': {}", p.display(), e))?;
+            let config: KioskConfig = serde_json::from_str(&content)
+                .map_err(|e| format!("Failed to parse KIOSK_CONFIG at '{}': {}", p.display(), e))?;
+            validate_kiosk_config(&config)?;
+            return Ok(ConfigMetaResponse {
+                config,
+                source: ConfigSource::Cli,
+                is_readonly: true,
+                resolved_path: p.to_string_lossy().to_string(),
+            });
         }
     }
 
@@ -340,14 +368,15 @@ pub fn resolve_configuration(
     if let Some(exe) = exe_path {
         if let Some(port_path) = find_portable_config_path(exe) {
             if let Ok(content) = fs::read_to_string(&port_path) {
-                if let Ok(config) = serde_json::from_str::<KioskConfig>(&content) {
-                    return ConfigMetaResponse {
-                        config,
-                        source: ConfigSource::Portable,
-                        is_readonly: true,
-                        resolved_path: port_path.to_string_lossy().to_string(),
-                    };
-                }
+                let config: KioskConfig = serde_json::from_str(&content)
+                    .map_err(|e| format!("Failed to parse portable config at '{}': {}", port_path.display(), e))?;
+                validate_kiosk_config(&config)?;
+                return Ok(ConfigMetaResponse {
+                    config,
+                    source: ConfigSource::Portable,
+                    is_readonly: true,
+                    resolved_path: port_path.to_string_lossy().to_string(),
+                });
             }
         }
     }
@@ -356,24 +385,27 @@ pub fn resolve_configuration(
     let appdata_file = app_data_dir.join("config.json");
     if appdata_file.is_file() {
         if let Ok(content) = fs::read_to_string(&appdata_file) {
-            if let Ok(config) = serde_json::from_str::<KioskConfig>(&content) {
-                return ConfigMetaResponse {
-                    config,
-                    source: ConfigSource::AppData,
-                    is_readonly: false,
-                    resolved_path: appdata_file.to_string_lossy().to_string(),
-                };
-            }
+            let config: KioskConfig = serde_json::from_str(&content)
+                .map_err(|e| format!("Failed to parse AppData config at '{}': {}", appdata_file.display(), e))?;
+            validate_kiosk_config(&config)?;
+            return Ok(ConfigMetaResponse {
+                config,
+                source: ConfigSource::AppData,
+                is_readonly: false,
+                resolved_path: appdata_file.to_string_lossy().to_string(),
+            });
         }
     }
 
     // Level 4: Compiled defaults
-    ConfigMetaResponse {
-        config: KioskConfig::default(),
+    let defaults = KioskConfig::default();
+    validate_kiosk_config(&defaults)?;
+    Ok(ConfigMetaResponse {
+        config: defaults,
         source: ConfigSource::Defaults,
         is_readonly: false,
         resolved_path: "<compiled defaults>".into(),
-    }
+    })
 }
 
 /// Atomically persists configuration to destination path.
@@ -417,20 +449,11 @@ pub fn validate_and_save_config(
 
     // Shadowing protection: reject in-place save if active config is locked by CLI or Portable
     if current_meta.is_readonly {
-        return Err(format!(
-            "Active configuration is locked by a higher-precedence {} source ({}). In-place saving is disabled to prevent silent shadowing. Use export_config instead.",
-            current_meta.source, current_meta.resolved_path
-        ));
+        return Err("Active configuration is locked by a higher-precedence portable or CLI source. In-place saving is disabled to prevent shadowing. Use export_config to save a separate file.".into());
     }
 
-    // Validation: endpoint count vs max_resident_webviews
-    if new_config.endpoints.len() > new_config.limits.max_resident_webviews {
-        return Err(format!(
-            "Configured endpoints count ({}) exceeds max_resident_webviews limit ({}).",
-            new_config.endpoints.len(),
-            new_config.limits.max_resident_webviews
-        ));
-    }
+    // Validation: enforce resource invariants on candidate configuration
+    validate_kiosk_config(&new_config)?;
 
     let target_path = state.app_data_dir.join("config.json");
     write_config_atomic(&target_path, &new_config)?;
@@ -530,27 +553,27 @@ mod tests {
         f.write_all(serde_json::to_string(&cli_cfg).unwrap().as_bytes()).unwrap();
 
         // 1. All present: CLI must win
-        let meta = resolve_configuration(Some(&cli_file), Some(&exe_path), &appdata_dir);
+        let meta = resolve_configuration(Some(&cli_file), Some(&exe_path), &appdata_dir).unwrap();
         assert_eq!(meta.source, ConfigSource::Cli);
         assert!(meta.is_readonly);
         assert_eq!(meta.config.timing.grid_view_duration_ms, 55555);
 
         // 2. No CLI: Portable must win over AppData
-        let meta = resolve_configuration(None, Some(&exe_path), &appdata_dir);
+        let meta = resolve_configuration(None, Some(&exe_path), &appdata_dir).unwrap();
         assert_eq!(meta.source, ConfigSource::Portable);
         assert!(meta.is_readonly);
         assert_eq!(meta.config.timing.grid_view_duration_ms, 44444);
 
         // 3. No CLI, No Portable: AppData must win over Defaults
         let no_portable_exe = temp.path.join("other_bin");
-        let meta = resolve_configuration(None, Some(&no_portable_exe), &appdata_dir);
+        let meta = resolve_configuration(None, Some(&no_portable_exe), &appdata_dir).unwrap();
         assert_eq!(meta.source, ConfigSource::AppData);
         assert!(!meta.is_readonly);
         assert_eq!(meta.config.timing.grid_view_duration_ms, 33333);
 
         // 4. Nothing present: Defaults
         let empty_appdata = temp.path.join("empty_appdata");
-        let meta = resolve_configuration(None, Some(&no_portable_exe), &empty_appdata);
+        let meta = resolve_configuration(None, Some(&no_portable_exe), &empty_appdata).unwrap();
         assert_eq!(meta.source, ConfigSource::Defaults);
         assert!(!meta.is_readonly);
         assert_eq!(meta.config.endpoints.len(), 5);
@@ -595,7 +618,7 @@ mod tests {
         let err_port = validate_and_save_config(&state_port, new_config.clone()).unwrap_err();
         assert_eq!(
             err_port,
-            "Active configuration is locked by a higher-precedence Portable source (/dummy/kiosk-config.json). In-place saving is disabled to prevent silent shadowing. Use export_config instead."
+            "Active configuration is locked by a higher-precedence portable or CLI source. In-place saving is disabled to prevent shadowing. Use export_config to save a separate file."
         );
 
         // 2. CLI source: validate_and_save_config must reject
@@ -609,7 +632,7 @@ mod tests {
         let err_cli = validate_and_save_config(&state_cli, new_config).unwrap_err();
         assert_eq!(
             err_cli,
-            "Active configuration is locked by a higher-precedence CLI source (/dummy/cli.json). In-place saving is disabled to prevent silent shadowing. Use export_config instead."
+            "Active configuration is locked by a higher-precedence portable or CLI source. In-place saving is disabled to prevent shadowing. Use export_config to save a separate file."
         );
     }
 
@@ -632,7 +655,7 @@ mod tests {
         let err = validate_and_save_config(&state, new_config).unwrap_err();
         assert_eq!(
             err,
-            "Configured endpoints count (5) exceeds max_resident_webviews limit (2)."
+            "Endpoint count exceeds max_resident_webviews limit."
         );
     }
 
@@ -668,5 +691,45 @@ mod tests {
         assert_eq!(updated_meta.source, ConfigSource::AppData);
         assert!(!updated_meta.is_readonly);
         assert_eq!(updated_meta.config.timing.grid_view_duration_ms, 77777);
+    }
+
+    #[test]
+    fn test_loaded_config_safety_invariants() {
+        let temp = TempDirGuard::new("loaded_safety");
+        let appdata_dir = temp.path.join("appdata");
+        fs::create_dir_all(&appdata_dir).unwrap();
+
+        // 1. Loaded config exceeds max_resident_webviews > 16 ceiling
+        let mut invalid_limit_cfg = KioskConfig::default();
+        invalid_limit_cfg.limits.max_resident_webviews = 20;
+        let limit_file = temp.path.join("invalid_limit.json");
+        fs::write(&limit_file, serde_json::to_string(&invalid_limit_cfg).unwrap()).unwrap();
+
+        let res = resolve_configuration(Some(&limit_file), None, &appdata_dir);
+        assert!(res.is_err(), "Must reject loaded config with max_resident_webviews > 16");
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("exceeds system safety ceiling (16)"));
+
+        // 2. Loaded config with endpoints > limit
+        let mut invalid_endpoints_cfg = KioskConfig::default();
+        invalid_endpoints_cfg.limits.max_resident_webviews = 3; // 5 endpoints > 3
+        let endpoints_file = temp.path.join("invalid_endpoints.json");
+        fs::write(&endpoints_file, serde_json::to_string(&invalid_endpoints_cfg).unwrap()).unwrap();
+
+        let res = resolve_configuration(Some(&endpoints_file), None, &appdata_dir);
+        assert!(res.is_err(), "Must reject loaded config with endpoints > limit");
+        let err_msg = res.unwrap_err();
+        assert_eq!(err_msg, "Endpoint count exceeds max_resident_webviews limit.");
+
+        // 3. Loaded config with zero endpoints
+        let mut empty_endpoints_cfg = KioskConfig::default();
+        empty_endpoints_cfg.endpoints.clear();
+        let empty_file = temp.path.join("empty_endpoints.json");
+        fs::write(&empty_file, serde_json::to_string(&empty_endpoints_cfg).unwrap()).unwrap();
+
+        let res = resolve_configuration(Some(&empty_file), None, &appdata_dir);
+        assert!(res.is_err(), "Must reject loaded config with zero endpoints");
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("at least one endpoint must be configured"));
     }
 }
