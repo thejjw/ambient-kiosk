@@ -81,7 +81,7 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Exposes local HTTP/SOCKS5 proxy on `127.0.0.1:<port>` when `adblock_dns_enabled` is active.
 * Implement scroll-free dynamic $M \times N$ auto-fitting geometry calculator:
   * Dynamically computes row count $R$ and per-row column counts $c_r$ such that $\sum c_r = N$, scaling from $1 \times 1$ up to arbitrary $N$ (e.g. $[3, 2]$ for $N = 5$, $3 \times 2$ for $N = 6$, $4 \times 2$ for $N = 8$, $3 \times 3$ for $N = 9$).
-  * Supports `strategy: "auto"` by default with optional explicit `rows: [c0, c1, ...]` override.
+  * Supports `strategy: "auto"` evaluated against configurable `target_tile_aspect_ratio` (default 1.4), with optional explicit `rows: [c0, c1, ...]` override.
   * Full-bleed default ($p = 0, g = 0$) guaranteeing 100% window client area coverage with zero outer scrollbars or clipping.
   * Configurable optional header reservation ($y \in [0, \text{header\_height}]$) when HUD is enabled.
 * Implement full-resident webview lifecycle manager:

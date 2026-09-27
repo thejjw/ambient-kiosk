@@ -285,6 +285,7 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
   },
   "layout": {
     "strategy": "auto",
+    "target_tile_aspect_ratio": 1.4,
     "rows": null,
     "padding_px": 0,
     "gap_px": 0
