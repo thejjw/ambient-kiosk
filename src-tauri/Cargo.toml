@@ -10,17 +10,17 @@ name = "ambient_kiosk_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-proxy", "macos-private-api", "tray-icon", "unstable"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-url = "2"
+tauri = { version = "2.12", features = ["macos-proxy", "macos-private-api", "tray-icon", "unstable"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.53", features = ["full"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+url = "2.5"
 parking_lot = "0.12"
-tauri-plugin-global-shortcut = "2"
+tauri-plugin-global-shortcut = "2.4"
 
 [[bin]]
 name = "ambient-kiosk"
