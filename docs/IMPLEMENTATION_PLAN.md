@@ -58,8 +58,12 @@ This document outlines the step-by-step implementation roadmap for building **Am
      * macOS: `~/Library/Application Support/ambient-kiosk/config.json`
      * Windows: `%APPDATA%\ambient-kiosk\config.json`
      * Linux: `~/.config/ambient-kiosk/config.json`
-     * UI settings edits and runtime saves persist exclusively to this path unless the user supplied an explicit custom writable path.
+     * Standard target for in-app preference saves when no portable override is active.
   4. **Compiled Defaults**: Built-in presets used if no external configuration file is present.
+* Implement Source-Aware Persistence & Shadowing Protection:
+  * Backend returns config metadata: `source: "cli" | "portable" | "appdata" | "defaults"`, `is_readonly: bool`.
+  * If active source is portable/CLI: Settings UI is read-only with an "Export / Save As..." action; in-place saves return an explicit error to prevent silent shadowing.
+  * If active source is app-data or defaults: In-place saves persist directly to user Application Support.
 * Seed default endpoints with the 5 presets:
   1. Biztoc (`https://biztoc.com/`)
   2. Alltoc (`https://alltoc.com/`)
@@ -69,7 +73,7 @@ This document outlines the step-by-step implementation roadmap for building **Am
 * Expose Tauri commands:
   * `get_config() -> KioskConfig`
   * `save_config(config: KioskConfig) -> Result<(), String>`
-* **Verification**: Unit tests for resolution precedence (CLI > portable read-only > writable app-data > defaults), serialization/deserialization, and rejection of writes into signed bundle directories.
+* **Verification**: Unit tests for resolution precedence (CLI > portable read-only > writable app-data > defaults), serialization/deserialization, rejection of writes into signed bundle directories, and assertion that `save_config` rejects shadowed saves when a higher-precedence portable source is active.
 
 ### Phase 3: Native Multi-Webview Orchestration & Adblocking Proxy
 * Implement embedded DNS-resolving local proxy in Rust:

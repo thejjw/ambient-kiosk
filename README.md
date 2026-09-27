@@ -32,10 +32,9 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
 4. **Pipelined Pre-Refresh (Planned)**: Design initiates a native background reload (`Webview::reload()`) on the upcoming tile during minimization to pipeline content updates before expansion (readiness and fallback behavior subject to Phase 0 feasibility spike).
 5. **Bounded Lifecycle Pool**: Caps active child webviews to visible slots ($M = 5$) plus a bounded prefetch buffer ($K = 1$), avoiding runaway webview process count and memory consumption.
 6. **AdGuard DNS Adblocking (Planned / Spike)**: Proposed architecture defaults to routing child webview requests through an embedded loopback proxy resolving via AdGuard DNS-over-HTTPS (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (`94.140.14.14:53`), with a user configurable option to opt into unproxied system DNS (macOS WKWebView proxy viability subject to Phase 0 spike).
-7. **High Configurability & Safe Discovery**:
-   * CLI / Env override: `--config <path>` or `KIOSK_CONFIG=<path>`.
-   * Portable bundle/binary-adjacent config (`kiosk-config.json` beside `App.app` on macOS or `.exe` on Windows/Linux) as a read-only override (never auto-writing into signed bundles).
-   * Writable user preferences in standard OS AppData directories.
+7. **High Configurability & Shadowing Protection**:
+   * Resolution Precedence: CLI/Env override (`--config`) > portable bundle-adjacent config (read-only) > writable OS AppData preferences > compiled defaults.
+   * Source-Aware Safety: When a portable override is active, UI settings operate in read-only mode with "Export / Save As" to prevent silent shadowing; in-place saves write to AppData only when running without overrides.
 ---
 
 ## Documentation

@@ -219,21 +219,32 @@ To update headlines and charts before expansion:
 
 ## 6. Comprehensive Configuration Schema & Portable Discovery
 
-### 6.1 Configuration Precedence & Platform Resolution
-To maximize deployment flexibility while respecting OS security boundaries and code signing (preventing damage to macOS `.app` bundle signatures), configuration files are resolved in strict priority order:
+### 6.1 Configuration Precedence & Source-Aware Persistence
+To maximize deployment flexibility while respecting OS security boundaries, code-signing integrity (macOS `.app` bundle sealing), and preventing silent preference shadowing, configuration resolution and persistence adhere to strict source-aware rules:
+
+#### Precedence Order:
 1. **Explicit CLI / Environment Override**:
    `--config <path>` command-line argument or `KIOSK_CONFIG=<path>` environment variable.
 2. **Portable Bundle-Adjacent Config (Read-Only Override)**:
-   * On macOS: `kiosk-config.json` located adjacent to `AmbientKiosk.app` (resolved by traversing up from the inner executable past `Contents/MacOS` to the directory hosting `.app`). The application never writes or auto-generates files inside `Contents/MacOS`, preserving code-signing seal integrity.
-   * On Windows/Linux: `kiosk-config.json` situated in the same folder as the executable binary.
+   * On macOS: `kiosk-config.json` situated adjacent to `AmbientKiosk.app` (resolved by traversing up from `Contents/MacOS` past `.app`). Never auto-written or modified.
+   * On Windows/Linux: `kiosk-config.json` located adjacent to the executable binary.
    * When detected, this file acts as a read-only portable configuration override.
 3. **User Application Support Directory (Writable Preferences)**:
    * macOS: `~/Library/Application Support/ambient-kiosk/config.json`
    * Windows: `%APPDATA%\ambient-kiosk\config.json`
    * Linux: `~/.config/ambient-kiosk/config.json`
-   * All in-app settings changes and UI preference saves write exclusively to this path.
 4. **Compiled Defaults**:
-   Hardcoded presets used if no external configuration file exists.
+   Built-in presets used if no external configuration file is detected.
+
+#### Source-Aware Persistence & Shadowing Protection:
+To eliminate silent shadowing (where saving changes to AppData would be ignored on the next launch due to an active higher-priority portable file):
+* **When Portable / CLI Source is Active (`is_readonly: true`)**:
+  * The settings UI displays a prominent "Configuration Managed / Read-Only" banner.
+  * In-place saving is disabled. The UI provides an "Export / Save As..." function to write a separate config file to a user-chosen destination.
+  * The Tauri backend command `save_config` rejects write attempts with an explicit error (`Err("Active configuration is locked by a higher-precedence source. Use Export to create an external configuration file.")`).
+* **When AppData / Defaults Source is Active (`is_readonly: false`)**:
+  * The settings UI operates in standard interactive mode.
+  * In-place saves persist directly to the writable Application Support directory and take effect immediately.
 ### 6.2 Configuration Schema
 
 ```json
