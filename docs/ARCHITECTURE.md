@@ -257,9 +257,9 @@ To maximize deployment flexibility while respecting OS security boundaries, code
    * On Windows/Linux: `kiosk-config.json` located adjacent to the executable binary.
    * When detected, this file acts as a read-only portable configuration override.
 3. **User Application Support Directory (Writable Preferences)**:
-   * macOS: `~/Library/Application Support/ambient-kiosk/config.json`
-   * Windows: `%APPDATA%\ambient-kiosk\config.json`
-   * Linux: `~/.config/ambient-kiosk/config.json`
+   * macOS: `~/Library/Application Support/com.ambientkiosk.kiosk/config.json`
+   * Windows: `%APPDATA%\com.ambientkiosk.kiosk\config.json`
+   * Linux: `~/.config/com.ambientkiosk.kiosk/config.json`
 4. **Compiled Defaults**:
    Built-in presets used if no external configuration file is detected.
 
@@ -371,26 +371,25 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
    * Tour timing, state machine transitions, readiness timeouts, and the local DNS-forwarding proxy run asynchronously on Tokio background tasks without blocking UI responsiveness.
 ---
 
-## 8. Adblocking DNS Engine (Architectural Proposal / Phase 0 Spike)
+## 8. Adblocking DNS Engine
 
 News aggregators and financial portals (e.g. AP News, Biztoc, Finviz) serve aggressive banner networks, video ads, and analytics beacons that degrade kiosk legibility and waste bandwidth.
 
 ### 8.1 Integration Mechanism & Limitations
 Operating system webviews (WebKit on macOS, WebView2 on Windows) do not expose a per-webview DNS configuration API; they automatically delegate all DNS lookups to the operating system network stack. A DNS URL (such as `https://dns.adguard-dns.com/dns-query` or `tls://dns.adguard-dns.com`) cannot be passed directly to a webview.
 
-To achieve app-scoped DNS adblocking without altering the user's system-wide network configuration, the proposed architecture routes child webview traffic through a local loopback proxy:
-1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (HTTP CONNECT / SOCKS5) on `127.0.0.1:<ephemeral_port>`.
+To achieve app-scoped DNS adblocking without altering the user's system-wide network configuration, the architecture routes child webview traffic through a local loopback proxy:
+1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (supporting SOCKS5 CONNECT, HTTP CONNECT, and plain HTTP forwarding) on `127.0.0.1:<ephemeral_port>`.
 2. **Upstream AdGuard DNS Resolution**:
    * The local proxy intercepts domain connections and resolves hostnames upstream using AdGuard DNS:
-     * **Primary**: DNS-over-HTTPS (DoH) via `https://dns.adguard-dns.com/dns-query`.
-     * **Secondary**: DNS-over-TLS (DoT) via `tls://dns.adguard-dns.com`.
-     * **Fallback in Proxy**: Plain DNS query to AdGuard resolver `94.140.14.14:53` if encrypted DNS fails or is unreachable.
+     * **Primary**: DNS-over-HTTPS (DoH) via `https://dns.adguard-dns.com/dns-query` (RFC 8484 wire format).
+     * **Secondary / Fallback in Proxy**: Plain UDP DNS query to AdGuard resolver `94.140.14.14:53` if encrypted DNS fails or is unreachable. Zero system DNS fallback.
+     * **Ad/Tracker Blocking**: Domains resolving to `0.0.0.0` are immediately blocked with HTTP 403 Forbidden / SOCKS5 REP 0x02.
 3. **Tauri Webview Attachment**: Child `WebviewBuilder` instances are configured with `.proxy_url("http://127.0.0.1:<port>")`.
 
 ### 8.2 Defaults, User Opt-In, and Platform Fallback
 * **Default Behavior**: AdGuard proxy-backed adblocking is active by default.
 * **User Opt-In to System DNS**: The application configuration provides an explicit opt-in setting (`adblock_dns_enabled: false` / `dns_provider: "system"`). When selected, `proxy_url` is omitted, and webviews resolve hostnames directly via the host OS's standard system DNS without proxy overhead.
-* **Phase 0 Feasibility & Platform Fallback**: Support for `proxy_url` on macOS WKWebView requires macOS 14+ and specific runtime flags. If proxy-based routing proves unstable during the Phase 0 feasibility spike, the application cannot force WKWebView alone to use a custom DNS IP. In that scenario, the app falls back to standard system DNS, and provides documentation guiding users to configure AdGuard DNS (`94.140.14.14`) at the OS or router level if adblocking is desired.
 
 ---
 

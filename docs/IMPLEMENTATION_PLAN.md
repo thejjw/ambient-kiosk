@@ -55,9 +55,9 @@ This document outlines the step-by-step implementation roadmap for building **Am
      * On Windows/Linux: `kiosk-config.json` adjacent to the executable binary.
      * Treated strictly as a read-only override when detected.
   3. **User Application Support Directory (Writable Preferences)**:
-     * macOS: `~/Library/Application Support/ambient-kiosk/config.json`
-     * Windows: `%APPDATA%\ambient-kiosk\config.json`
-     * Linux: `~/.config/ambient-kiosk/config.json`
+     * macOS: `~/Library/Application Support/com.ambientkiosk.kiosk/config.json`
+     * Windows: `%APPDATA%\com.ambientkiosk.kiosk\config.json`
+     * Linux: `~/.config/com.ambientkiosk.kiosk/config.json`
      * Standard target for in-app preference saves when no portable override is active.
   4. **Compiled Defaults**: Built-in presets used if no external configuration file is present.
 * Implement Source-Aware Persistence & Shadowing Protection:
@@ -77,7 +77,7 @@ This document outlines the step-by-step implementation roadmap for building **Am
 
 ### Phase 3: Native Multi-Webview Orchestration & Adblocking Proxy
 * Implement embedded DNS-resolving local proxy in Rust:
-  * Routes DNS queries to AdGuard DoH/DoT/UDP.
+  * Routes DNS queries to AdGuard DoH (RFC 8484) with AdGuard plain UDP fallback (`94.140.14.14:53`).
   * Exposes local HTTP/SOCKS5 proxy on `127.0.0.1:<port>` when `adblock_dns_enabled` is active.
 * Implement scroll-free dynamic $M \times N$ auto-fitting geometry calculator:
   * Dynamically computes row count $R$ and per-row column counts $c_r$ such that $\sum c_r = N$, scaling from $1 \times 1$ up to arbitrary $N$ (e.g. $[3, 2]$ for $N = 5$, $3 \times 2$ for $N = 6$, $4 \times 2$ for $N = 8$, $3 \times 3$ for $N = 9$).

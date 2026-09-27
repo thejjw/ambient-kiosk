@@ -29,9 +29,9 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
    * **Zero IPC Capabilities**: Remote URLs are never mapped to Tauri command capabilities; untrusted guest scripts cannot call native Rust APIs or access the host filesystem.
    * **Navigation Restrictions (`on_navigation`)**: Prevents untrusted guest pages from navigating to unauthorized origins or protocols (`file://`, `tauri://`).
    * **Popup Suppression (`on_new_window`)**: Intercepts `window.open` and `<a target="_blank">` to prevent rogue window breakouts.
-4. **Pipelined Pre-Refresh (Planned)**: Design initiates a native background reload (`Webview::reload()`) on the upcoming tile during minimization to pipeline content updates before expansion (readiness and fallback behavior subject to Phase 0 feasibility spike).
-5. **Full-Resident Single-Window Grid**: Allocates native child webviews for all $N$ configured sites ($M = N$) so every endpoint is simultaneously visible in the grid without outer scrolling, guarded by a configurable safety ceiling (`max_resident_webviews: 12`).
-6. **AdGuard DNS Adblocking (Planned / Spike)**: Proposed architecture defaults to routing child webview requests through an embedded loopback proxy resolving via AdGuard DNS-over-HTTPS (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (`94.140.14.14:53`), with a user configurable option to opt into unproxied system DNS (macOS WKWebView proxy viability subject to Phase 0 spike).
+4. **Pipelined Pre-Refresh**: Initiates a native background reload (`Webview::reload()`) on the upcoming tile during minimization to pipeline content updates before expansion, guarded by event-correlated generation tokens against stale completions.
+5. **Full-Resident Single-Window Grid**: Allocates native child webviews for all $N$ configured sites ($M = N$) so every endpoint is simultaneously visible in the grid without outer scrolling, guarded by a configurable safety ceiling (`max_resident_webviews: 12`, max 16).
+6. **AdGuard DNS Adblocking**: Routes child webview requests through an embedded loopback proxy (supporting SOCKS5, HTTP CONNECT, and plain HTTP forwarding) resolving via AdGuard DNS-over-HTTPS (`https://dns.adguard-dns.com/dns-query`) with AdGuard plain UDP fallback (`94.140.14.14:53`), with user opt-in to system DNS.
 7. **High Configurability & Shadowing Protection**:
    * Resolution Precedence: CLI/Env override (`--config`) > portable bundle-adjacent config (read-only) > writable OS AppData preferences > compiled defaults.
    * Source-Aware Safety: When a portable override is active, UI settings operate in read-only mode with "Export / Save As" to prevent silent shadowing; in-place saves write to AppData only when running without overrides.
@@ -51,9 +51,12 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
 ambient-kiosk/
 ├── docs/
 │   ├── ARCHITECTURE.md          # Comprehensive architecture & security spec
-│   └── IMPLEMENTATION_PLAN.md   # Step-by-step development roadmap
-├── README.md                    # Project overview & quickstart
-└── (src-tauri / src)            # Application codebase (scaffolded in Phase 1)
+│   ├── IMPLEMENTATION_PLAN.md   # Six-phase engineering roadmap & cross-platform guide
+│   └── MANUAL_TESTING.md        # Runtime manual verification checklist
+├── src-tauri/                   # Rust backend (Tauri v2, proxy, tour state machine)
+├── src/                         # Frontend controller UI (Vite + TypeScript)
+├── LICENSE                      # zlib-style permissive project license
+└── README.md                    # Project overview & quickstart
 ```
 
 ---
