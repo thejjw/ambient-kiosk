@@ -135,7 +135,7 @@ This document outlines the step-by-step implementation roadmap for building **Am
 
 This guide specifies how to tackle Windows and Linux compilation, testing, and deployment, highlighting what core components work out-of-the-box, where platform divergences exist, and what specific work is required for implementors on each target operating system.
 
-### 1. Core Cross-Platform Capabilities (Work Out-of-the-Box)
+### 1. Core Cross-Platform Capabilities (Shared Implementation / Expected Portable)
 
 The following core modules are implemented using standard, portable Rust and cross-platform Tauri v2 APIs that require no architectural changes for Windows or Linux:
 
@@ -151,7 +151,7 @@ The following core modules are implemented using standard, portable Rust and cro
 * **Embedded Loopback Proxy (`src-tauri/src/proxy.rs`)**:
   * Multiplexed HTTP CONNECT, SOCKS5 CONNECT, and plain HTTP forwarding built with standard `tokio::net` async sockets (`TcpListener`, `TcpStream`, `UdpSocket`).
   * Resolves upstream using AdGuard DoH (RFC 8484 wire format) with fallback to AdGuard plain UDP (`94.140.14.14:53`).
-  * `WebviewBuilder.proxy_url("http://127.0.0.1:<port>")` is supported natively by WebView2 on Windows and WebKitGTK 4.1 on Linux.
+  * `WebviewBuilder.proxy_url("http://127.0.0.1:<port>")` is an expected portable API on WebView2 (Windows) and WebKitGTK 4.1 (Linux), subject to native platform smoke tests.
 * **Frontend Controller UI (`src/`)**:
   * Vite + TypeScript frontend, HUD controls, and safe DOM endpoint management render identically inside the coordinator webview across all platforms.
 
@@ -163,22 +163,21 @@ Implementors deploying or testing on Windows and Linux must understand the follo
 
 #### A. Linux (Ubuntu / Debian / Fedora / Arch)
 
-1. **Global Shortcuts on Wayland vs. X11**:
+1. **Global Shortcuts & Input on Wayland vs. X11**:
    * *Architecture*: The global shortcut subsystem (`global-hotkey 0.8` used by `tauri-plugin-global-shortcut`) implements native key grabbing for **X11 only** via `x11rb`.
-   * *Wayland Limitation*: Under pure Wayland sessions (without XWayland active), global hotkey registration will fail or return an error because `global-hotkey 0.8` does not implement an XDG Desktop Portal (`org.freedesktop.portal.GlobalShortcuts`) backend.
-   * *Implementor Action*:
-     * In X11 sessions (GNOME on Xorg, XFCE, i3): Hotkeys (`Space`, arrows, `F11`, `Escape`, `KeyH`) function out-of-the-box.
-     * In pure Wayland sessions: The application handles shortcut registration failure gracefully without crashing. Users on pure Wayland must rely directly on the on-screen HUD buttons (`◀`, `⏸`, `▶`, `⛶`, `⚙`).
-     * Future Extension: Implement native DBus portal communication with `org.freedesktop.portal.GlobalShortcuts` to support Wayland global key grabs.
+   * *Wayland Reality*: Under pure Wayland sessions (without XWayland active), global hotkey registration returns an error because `global-hotkey 0.8` does not implement an XDG Desktop Portal (`org.freedesktop.portal.GlobalShortcuts`) backend. Furthermore, desktop-global cursor and window coordinate queries (`cursor_position` / `outer_position`) may be restricted by Wayland compositor security policies.
+   * *Impact*: Because `hud-overlay` initializes in click-through mode (`set_ignore_cursor_events: true`), relying on `KeyH` or top-edge global cursor coordinates to reveal the HUD can fail on pure Wayland, potentially rendering the floating overlay unreachable.
+   * *Required Implementor Work for Linux*:
+     * In X11 sessions (GNOME on Xorg, XFCE, i3): Hotkeys (`Space`, arrows, `F11`, `Escape`, `KeyH`) and cursor edge tracking operate out-of-the-box.
+     * In pure Wayland sessions: Implement an always-accessible control path (e.g. an in-window control bar or an opaque, non-click-through HUD window option) or integrate the `org.freedesktop.portal.GlobalShortcuts` DBus portal for native Wayland global key grabs.
 
 2. **Window Transparency vs. Hit-Testing (Click-Through)**:
    * *Architecture*: Window visual transparency (`transparent: true` in `tauri.conf.json`) and OS hit-testing/click-through (`set_ignore_cursor_events: true`) are separate mechanisms:
      * `transparent: true` governs visual alpha blending with the desktop.
      * `set_ignore_cursor_events: true` instructs the OS compositor to ignore pointer clicks and pass them through to underlying guest webviews.
    * *Linux Requirement*: Visual transparency on Linux requires an active EWMH compositing window manager (e.g., Mutter on GNOME, KWin on KDE, Picom/Compton on tiling WMs).
-   * *Implementor Action*:
-     * If deployed on a bare X11 window manager without a compositor (e.g. bare i3 or Openbox), transparent window regions will render as solid black rectangles. Ensure a compositor like Picom is running, or set `transparent: false` with background `#0d0d0d` in `tauri.conf.json`.
-
+   * *Required Implementor Work for Linux*:
+     * On non-composited window managers (bare X11 without a compositor such as i3 or Openbox), transparent window regions render as solid black rectangles. Supporting non-composited environments requires implementing a build-time or runtime window setting to create an opaque HUD window (`transparent: false` with background `#0d0d0d`).
 3. **System Dependencies & Packaging**:
    * *Required Development Libraries*:
      * Debian/Ubuntu: `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
@@ -192,8 +191,8 @@ Implementors deploying or testing on Windows and Linux must understand the follo
 
 1. **Child Webview Hosting & WebView2 Runtime**:
    * *Architecture*: Tauri v2 uses Microsoft Edge WebView2 (Chromium engine) via Win32 child `HWND`s.
-   * *System Requirement*: WebView2 runtime is pre-installed on Windows 10 and 11. For Windows Server or stripped environments, install the Evergreen WebView2 Bootstrapper.
-   * *Per-Webview Proxying*: `WebviewBuilder::proxy_url("http://127.0.0.1:<port>")` is supported natively by WebView2 without requiring special compilation flags.
+   * *System Requirement*: While Windows 11 includes the WebView2 runtime pre-installed, Windows 10 deployment should verify or install the Evergreen WebView2 Runtime to guarantee availability.
+   * *Per-Webview Proxying*: `WebviewBuilder::proxy_url("http://127.0.0.1:<port>")` is supported by WebView2 without requiring special compilation flags.
 
 2. **Window Background & Transparency**:
    * *Behavior*: Win32 ignores alpha channels on standard window surfaces, but WebView2 supports transparent background composition natively.

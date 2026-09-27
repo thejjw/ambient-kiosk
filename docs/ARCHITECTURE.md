@@ -376,7 +376,7 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
 News aggregators and financial portals (e.g. AP News, Biztoc, Finviz) serve aggressive banner networks, video ads, and analytics beacons that degrade kiosk legibility and waste bandwidth.
 
 ### 8.1 Integration Mechanism & Limitations
-Operating system webviews (WebKit on macOS, WebView2 on Windows) do not expose a per-webview DNS configuration API; they automatically delegate all DNS lookups to the operating system network stack. A DNS URL (such as `https://dns.adguard-dns.com/dns-query` or `tls://dns.adguard-dns.com`) cannot be passed directly to a webview.
+Operating system webviews (WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux) do not expose a per-webview DNS configuration API; they automatically delegate all DNS lookups to the operating system network stack. A custom DNS endpoint (such as `https://dns.adguard-dns.com/dns-query`) cannot be configured natively on an individual webview context without affecting the host system.
 
 To achieve app-scoped DNS adblocking without altering the user's system-wide network configuration, the architecture routes child webview traffic through a local loopback proxy:
 1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (supporting SOCKS5 CONNECT, HTTP CONNECT, and plain HTTP forwarding) on `127.0.0.1:<ephemeral_port>`.

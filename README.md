@@ -24,7 +24,7 @@ If loaded in standard HTML `<iframe>` tags, external sites are blocked by the br
 ### How Ambient Kiosk Solves This
 Instead of using `<iframe>` tags or stripping HTTP security headers via fragile reverse proxies, Ambient Kiosk leverages **Tauri v2 Native Multi-Webviews**:
 1. **Top-Level Guest Browsing Contexts**: Each dashboard slot is instantiated as an independent child `Webview` (`WebviewBuilder`) attached to the host window.
-2. **Zero Framing Constraints**: Because each child webview is an independent native top-level browser context (WKWebView on macOS, WebView2 on Windows), `X-Frame-Options` and `frame-ancestors` do not apply.
+2. **Zero Framing Constraints**: Because each child webview is an independent native top-level browser context (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux), `X-Frame-Options` and `frame-ancestors` do not apply.
 3. **Strict Security Isolation**:
    * **Zero IPC Capabilities**: Remote URLs are never mapped to Tauri command capabilities; untrusted guest scripts cannot call native Rust APIs or access the host filesystem.
    * **Navigation Restrictions (`on_navigation`)**: Prevents untrusted guest pages from navigating to unauthorized origins or protocols (`file://`, `tauri://`).
