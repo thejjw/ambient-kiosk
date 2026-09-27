@@ -19,8 +19,20 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false
+      },
+      {
+        "title": "Ambient Kiosk HUD",
+        "label": "hud-overlay",
+        "width": 1920,
+        "height": 48,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }

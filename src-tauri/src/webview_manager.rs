@@ -65,7 +65,7 @@ pub struct ManagedWebviewTile {
     pub title: String,
     pub url: String,
     pub webview: Webview,
-    pub resting_rect: LogicalRect,
+    pub resting_rect: parking_lot::Mutex<LogicalRect>,
     pub coordinator: Arc<TileLoadCoordinator>,
 }
 
@@ -151,7 +151,7 @@ pub fn spawn_resident_webviews(
             title: ep.title.clone(),
             url: ep.url.clone(),
             webview,
-            resting_rect: *rect,
+            resting_rect: parking_lot::Mutex::new(*rect),
             coordinator,
         });
     }

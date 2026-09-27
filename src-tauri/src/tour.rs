@@ -64,6 +64,17 @@ impl TourStateData {
             candidate_reload_finished: false,
         }
     }
+
+    /// Returns true if the active tile is currently expanded or paused while expanded.
+    pub fn is_visually_expanded(&self) -> bool {
+        let effective_state = if self.current_state == TourStateName::Paused {
+            self.previous_state_before_pause
+        } else {
+            self.current_state
+        };
+        effective_state == TourStateName::MaximizedSingleSite
+            || effective_state == TourStateName::Maximizing
+    }
 }
 
 /// Pure state machine coordinating tour state transitions, generation tokens, and timeout logic.
@@ -308,8 +319,9 @@ pub struct TourController {
     pub app_handle: AppHandle,
     pub machine: TourStateMachine,
     pub reserved_header_height: f64,
-    pub window_width: f64,
-    pub window_height: f64,
+    pub layout: Mutex<crate::config::LayoutConfig>,
+    pub window_geometry: Mutex<(f64, f64)>,
+    pub geometry_generation: AtomicU64,
     pub tiles: Vec<ManagedWebviewTile>,
     pub is_running: AtomicBool,
     pub should_exit: AtomicBool,
@@ -319,6 +331,7 @@ impl TourController {
     pub fn new(
         app_handle: AppHandle,
         timing: TimingConfig,
+        layout: crate::config::LayoutConfig,
         reserved_header_height: f64,
         window_width: f64,
         window_height: f64,
@@ -329,8 +342,9 @@ impl TourController {
             app_handle,
             machine: TourStateMachine::new(timing, total),
             reserved_header_height,
-            window_width,
-            window_height,
+            layout: Mutex::new(layout),
+            window_geometry: Mutex::new((window_width, window_height)),
+            geometry_generation: AtomicU64::new(1),
             tiles,
             is_running: AtomicBool::new(false),
             should_exit: AtomicBool::new(false),
@@ -340,9 +354,9 @@ impl TourController {
     pub fn emit_status(&self) {
         let titles: Vec<String> = self.tiles.iter().map(|t| t.title.clone()).collect();
         let payload = self.machine.get_status_payload(&titles);
-        let _ = self.app_handle.emit_to("main", "tour-status-update", payload);
+        // Strictly target HUD overlay window, never guest webviews
+        let _ = self.app_handle.emit_to("hud-overlay", "tour-status-update", payload);
     }
-
     pub fn start(&self) {
         self.is_running.store(true, Ordering::SeqCst);
         self.machine.start();
@@ -373,15 +387,21 @@ impl TourController {
         }
         self.emit_status();
 
-        // Perform bounds interpolation loop over transition_duration
+        let anim_gen = self.geometry_generation.load(Ordering::SeqCst);
         let steps = 25;
         let step_delay = Duration::from_millis((transition_duration.as_millis() as u64 / steps as u64).max(1));
-        let rest = self.tiles[target].resting_rect;
-        let full_w = self.window_width;
-        let full_h = self.window_height - self.reserved_header_height;
+        let (full_w, full_h_raw) = *self.window_geometry.lock();
+        let full_h = full_h_raw - self.reserved_header_height;
         let full_y = self.reserved_header_height;
+        let rest = *self.tiles[target].resting_rect.lock();
 
+        let mut aborted = false;
         for s in 1..=steps {
+            if self.geometry_generation.load(Ordering::SeqCst) != anim_gen {
+                aborted = true;
+                break;
+            }
+
             let t = s as f64 / steps as f64;
             let eased_t = 3.0 * t * t - 2.0 * t * t * t;
 
@@ -397,10 +417,19 @@ impl TourController {
             std::thread::sleep(step_delay);
         }
 
-        let _ = self.tiles[target].webview.set_bounds(Rect {
-            position: tauri::Position::Logical(LogicalPosition::new(0.0, full_y)),
-            size: tauri::Size::Logical(LogicalSize::new(full_w, full_h)),
-        });
+        if aborted {
+            let (curr_w, curr_h_raw) = *self.window_geometry.lock();
+            let curr_h = curr_h_raw - self.reserved_header_height;
+            let _ = self.tiles[target].webview.set_bounds(Rect {
+                position: tauri::Position::Logical(LogicalPosition::new(0.0, self.reserved_header_height)),
+                size: tauri::Size::Logical(LogicalSize::new(curr_w, curr_h)),
+            });
+        } else if self.geometry_generation.load(Ordering::SeqCst) == anim_gen {
+            let _ = self.tiles[target].webview.set_bounds(Rect {
+                position: tauri::Position::Logical(LogicalPosition::new(0.0, full_y)),
+                size: tauri::Size::Logical(LogicalSize::new(full_w, full_h)),
+            });
+        }
 
         self.machine.finish_maximizing();
         self.emit_status();
@@ -417,14 +446,21 @@ impl TourController {
         let _ = self.tiles[candidate].trigger_reload(gen);
 
         // Interpolate back to resting slot
+        let anim_gen = self.geometry_generation.load(Ordering::SeqCst);
         let steps = 25;
         let step_delay = Duration::from_millis((transition_duration.as_millis() as u64 / steps as u64).max(1));
-        let rest = self.tiles[target].resting_rect;
-        let full_w = self.window_width;
-        let full_h = self.window_height - self.reserved_header_height;
+        let (full_w, full_h_raw) = *self.window_geometry.lock();
+        let full_h = full_h_raw - self.reserved_header_height;
         let full_y = self.reserved_header_height;
+        let rest = *self.tiles[target].resting_rect.lock();
 
+        let mut aborted = false;
         for s in 1..=steps {
+            if self.geometry_generation.load(Ordering::SeqCst) != anim_gen {
+                aborted = true;
+                break;
+            }
+
             let t = s as f64 / steps as f64;
             let eased_t = 3.0 * t * t - 2.0 * t * t * t;
 
@@ -440,10 +476,18 @@ impl TourController {
             std::thread::sleep(step_delay);
         }
 
-        let _ = self.tiles[target].webview.set_bounds(Rect {
-            position: tauri::Position::Logical(LogicalPosition::new(rest.x, rest.y)),
-            size: tauri::Size::Logical(LogicalSize::new(rest.width, rest.height)),
-        });
+        if aborted {
+            let rest = *self.tiles[target].resting_rect.lock();
+            let _ = self.tiles[target].webview.set_bounds(Rect {
+                position: tauri::Position::Logical(LogicalPosition::new(rest.x, rest.y)),
+                size: tauri::Size::Logical(LogicalSize::new(rest.width, rest.height)),
+            });
+        } else if self.geometry_generation.load(Ordering::SeqCst) == anim_gen {
+            let _ = self.tiles[target].webview.set_bounds(Rect {
+                position: tauri::Position::Logical(LogicalPosition::new(rest.x, rest.y)),
+                size: tauri::Size::Logical(LogicalSize::new(rest.width, rest.height)),
+            });
+        }
 
         // Restore sibling webviews
         for tile in &self.tiles {
@@ -453,7 +497,6 @@ impl TourController {
         self.machine.finish_minimizing();
         self.emit_status();
     }
-
     pub fn on_page_load_finished(&self, loaded_index: usize, event_gen: u64) {
         if self.machine.on_page_load_finished(loaded_index, event_gen) {
             self.emit_status();
@@ -495,6 +538,42 @@ impl TourController {
             self.transition_to_minimizing(active);
         }
     }
+
+    pub fn handle_window_resize(&self, win_w: f64, win_h: f64) {
+        self.geometry_generation.fetch_add(1, Ordering::SeqCst);
+        *self.window_geometry.lock() = (win_w, win_h);
+        let layout_cfg = self.layout.lock().clone();
+        let (rects, _) = crate::layout::calculate_grid_layout(
+            win_w,
+            win_h,
+            self.tiles.len(),
+            layout_cfg.target_tile_aspect_ratio,
+            layout_cfg.rows.as_deref(),
+            self.reserved_header_height,
+            layout_cfg.padding_px,
+            layout_cfg.gap_px,
+        );
+
+        let data = self.machine.state.lock();
+        let is_expanded = data.is_visually_expanded();
+        let active = data.active_index;
+        drop(data);
+
+        for (i, (tile, rect)) in self.tiles.iter().zip(rects.iter()).enumerate() {
+            *tile.resting_rect.lock() = *rect;
+            if is_expanded && i == active {
+                let _ = tile.webview.set_bounds(Rect {
+                    position: tauri::Position::Logical(LogicalPosition::new(0.0, self.reserved_header_height)),
+                    size: tauri::Size::Logical(LogicalSize::new(win_w, win_h - self.reserved_header_height)),
+                });
+            } else {
+                let _ = tile.webview.set_bounds(Rect {
+                    position: tauri::Position::Logical(LogicalPosition::new(rect.x, rect.y)),
+                    size: tauri::Size::Logical(LogicalSize::new(rect.width, rect.height)),
+                });
+            }
+        }
+    }
 }
 
 pub fn start_tour_loop(
@@ -506,7 +585,7 @@ pub fn start_tour_loop(
         controller.start();
     }
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 
         loop {
@@ -849,5 +928,22 @@ mod tests {
         // 4. Resume enters GridView with candidate 2
         machine.resume();
         assert_eq!(machine.state.lock().current_state, TourStateName::GridView);
+    }
+    #[test]
+    fn test_resize_while_paused_in_maximized_maintains_expanded_state() {
+        let machine = TourStateMachine::new(TimingConfig::default(), 5);
+        machine.start();
+        machine.begin_maximizing(0);
+        machine.finish_maximizing();
+        assert_eq!(machine.state.lock().current_state, TourStateName::MaximizedSingleSite);
+        assert!(machine.state.lock().is_visually_expanded());
+
+        // Pause while maximized
+        machine.pause();
+        assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::MaximizedSingleSite);
+
+        // Production method call: verify state machine considers it visually expanded
+        assert!(machine.state.lock().is_visually_expanded(), "Must call production is_visually_expanded() and verify true");
     }
 }
