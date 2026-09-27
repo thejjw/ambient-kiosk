@@ -348,29 +348,25 @@ pub fn validate_kiosk_config(config: &KioskConfig) -> Result<(), String> {
                 idx + 1
             ));
         }
-        match url::Url::parse(&ep.url) {
-            Ok(parsed) => {
-                let has_scheme_delimiter = ep.url.contains("://");
-                let has_valid_host = parsed
-                    .host_str()
-                    .map(|h| !h.trim().is_empty())
-                    .unwrap_or(false);
-                if (parsed.scheme() != "http" && parsed.scheme() != "https")
-                    || !has_scheme_delimiter
-                    || !has_valid_host
-                {
-                    return Err(format!(
-                        "Configuration error: endpoint '{}' URL '{}' must be an absolute http or https URL with a valid host.",
-                        ep.title, ep.url
-                    ));
-                }
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Configuration error: endpoint '{}' has an invalid URL '{}': {}.",
-                    ep.title, ep.url, e
-                ));
-            }
+        let err_msg = format!(
+            "Configuration error: endpoint '{}' URL '{}' must be an absolute http or https URL with a valid host.",
+            ep.title, ep.url
+        );
+        let parsed = url::Url::parse(&ep.url).map_err(|_| err_msg.clone())?;
+        let has_authority = ep
+            .url
+            .get(parsed.scheme().len()..)
+            .is_some_and(|rest| rest.starts_with("://"));
+        let has_valid_host = parsed
+            .host_str()
+            .map(|h| !h.trim().is_empty())
+            .unwrap_or(false);
+
+        if (parsed.scheme() != "http" && parsed.scheme() != "https")
+            || !has_authority
+            || !has_valid_host
+        {
+            return Err(err_msg);
         }
     }
 
@@ -863,7 +859,7 @@ mod tests {
         let err = validate_kiosk_config(&bad_title_cfg).unwrap_err();
         assert!(err.contains("has an empty title"));
 
-        // 2. Invalid URL scheme or missing host validation (file:, javascript:, https:, http:/path)
+        // 2. Invalid URL scheme or missing host validation (file:, https:, http:/path, http:/foo://bar, not-a-url)
         let mut bad_scheme_cfg = KioskConfig::default();
         bad_scheme_cfg.endpoints[0].url = "file:///etc/passwd".into();
         let err = validate_kiosk_config(&bad_scheme_cfg).unwrap_err();
@@ -872,17 +868,22 @@ mod tests {
         let mut no_host_cfg = KioskConfig::default();
         no_host_cfg.endpoints[0].url = "https:".into();
         let err = validate_kiosk_config(&no_host_cfg).unwrap_err();
-        assert!(err.contains("has an invalid URL"));
+        assert!(err.contains("must be an absolute http or https URL"));
 
         let mut path_only_cfg = KioskConfig::default();
         path_only_cfg.endpoints[0].url = "http:/path/only".into();
         let err = validate_kiosk_config(&path_only_cfg).unwrap_err();
         assert!(err.contains("must be an absolute http or https URL"));
 
+        let mut delayed_delimiter_cfg = KioskConfig::default();
+        delayed_delimiter_cfg.endpoints[0].url = "http:/foo://bar".into();
+        let err = validate_kiosk_config(&delayed_delimiter_cfg).unwrap_err();
+        assert!(err.contains("must be an absolute http or https URL"));
+
         let mut unparseable_cfg = KioskConfig::default();
         unparseable_cfg.endpoints[0].url = "not a valid url".into();
         let err = validate_kiosk_config(&unparseable_cfg).unwrap_err();
-        assert!(err.contains("has an invalid URL"));
+        assert!(err.contains("must be an absolute http or https URL"));
 
         // 3. Explicit CLI config missing file error propagation (no silent fallthrough)
         let nonexistent_cli = temp.path.join("nonexistent_cli.json");
