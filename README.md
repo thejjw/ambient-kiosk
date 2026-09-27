@@ -30,7 +30,7 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
    * **Navigation Restrictions (`on_navigation`)**: Prevents untrusted guest pages from navigating to unauthorized origins or protocols (`file://`, `tauri://`).
    * **Popup Suppression (`on_new_window`)**: Intercepts `window.open` and `<a target="_blank">` to prevent rogue window breakouts.
 4. **Pipelined Pre-Refresh (Planned)**: Design initiates a native background reload (`Webview::reload()`) on the upcoming tile during minimization to pipeline content updates before expansion (readiness and fallback behavior subject to Phase 0 feasibility spike).
-5. **Bounded Lifecycle Pool**: Caps active child webviews to visible slots ($M = 5$) plus a bounded prefetch buffer ($K = 1$), avoiding runaway webview process count and memory consumption.
+5. **Full-Resident Single-Window Grid**: Allocates native child webviews for all $N$ configured sites ($M = N$) so every endpoint is simultaneously visible in the grid without outer scrolling, guarded by a configurable safety ceiling (`max_resident_webviews: 12`).
 6. **AdGuard DNS Adblocking (Planned / Spike)**: Proposed architecture defaults to routing child webview requests through an embedded loopback proxy resolving via AdGuard DNS-over-HTTPS (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (`94.140.14.14:53`), with a user configurable option to opt into unproxied system DNS (macOS WKWebView proxy viability subject to Phase 0 spike).
 7. **High Configurability & Shadowing Protection**:
    * Resolution Precedence: CLI/Env override (`--config`) > portable bundle-adjacent config (read-only) > writable OS AppData preferences > compiled defaults.

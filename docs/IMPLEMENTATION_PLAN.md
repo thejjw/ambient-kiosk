@@ -47,7 +47,7 @@ This document outlines the step-by-step implementation roadmap for building **Am
 * **Verification**: `cargo check` and `bun run build` succeed; minimal window renders.
 ### Phase 2: Configuration & Persistence Layer
 * Define Rust data structures with `serde`:
-  * `KioskConfig`, `WindowConfig`, `LayoutConfig`, `TimingConfig`, `TourConfig`, `NetworkDnsConfig`, `EndpointItem`.
+  * `KioskConfig`, `WindowConfig`, `LayoutConfig`, `TimingConfig`, `TourConfig`, `NetworkDnsConfig`, `LimitsConfig`, `EndpointItem`.
 * Implement configuration resolution precedence & platform isolation:
   1. **CLI / Environment Override**: `--config <path>` flag or `KIOSK_CONFIG=<path>` environment variable.
   2. **Platform-Resolved Portable Config (Read-Only Override)**:
@@ -84,10 +84,10 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Supports `strategy: "auto"` by default with optional explicit `rows: [c0, c1, ...]` override.
   * Full-bleed default ($p = 0, g = 0$) guaranteeing 100% window client area coverage with zero outer scrollbars or clipping.
   * Configurable optional header reservation ($y \in [0, \text{header\_height}]$) when HUD is enabled.
-* Implement bounded webview pool manager:
-  * For baseline $N = 5$, maintain all 5 visible webviews resident simultaneously.
-  * Apply virtualization and slot re-navigation only when configured URLs exceed visible slots ($M = 5$).
-  * Limit in-flight reloads to at most 1 (the single upcoming target tile).
+* Implement full-resident webview lifecycle manager:
+  * Allocates resident native child webviews for all $N$ configured endpoints ($M = N$) so every site renders simultaneously without scrolling.
+  * Enforces `max_resident_webviews` validation (default 12) during config parsing to prevent memory/compositor exhaustion.
+  * Limits in-flight reloads to at most 1 (the single upcoming target tile).
 * Implement Security Policies:
   * `on_navigation`: Restrict URLs strictly to `http`/`https` protocols.
   * `on_new_window`: Intercept popup requests; cancel popups or delegate to system browser.

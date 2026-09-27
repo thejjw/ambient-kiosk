@@ -136,18 +136,32 @@ The layout engine guarantees that all $N$ configured endpoints fit simultaneousl
     * $N = 10 \implies [4, 3, 3]$ or $5 \times 2$
     * $N = 12 \implies 4 \times 3$
 
-* **Auto-Fitting Partitioning Algorithm**:
-  1. Compute row count $R$ to maintain landscape-appropriate tile aspect ratios for window dimensions $(W, H)$:
-     $$R = \text{clamp}\left(\left\lfloor \sqrt{N \cdot \frac{H}{W}} + 0.5 \right\rfloor, 1, N\right)$$
-  2. Distribute columns per row $c_r$ ($r \in [0, R - 1]$):
-     $$q = \lfloor N / R \rfloor, \quad m = N \pmod R$$
-     The first $m$ rows receive $c_r = q + 1$, and remaining rows receive $c_r = q$, ensuring $\sum_{r=0}^{R-1} c_r = N$.
-  3. Compute slot bounds for slot at row $r$ and column index $k \in [0, c_r - 1]$:
-     $$h_r = \frac{H - \text{header\_height} - (R - 1)g - 2p}{R}$$
-     $$w_{r, k} = \frac{W - (c_r - 1)g - 2p}{c_r}$$
-     $$x_{r, k} = p + k \cdot (w_{r, k} + g)$$
-     $$y_{r, k} = \text{header\_height} + p + r \cdot (h_r + g)$$
-  4. In full-bleed mode ($p = 0, g = 0, \text{header\_height} = 0$), each tile expands to exact fractional bounds:
+* **Deterministic Aspect-Ratio Scorer Algorithm**:
+  To ensure tiles maintain readable landscape proportions on any display (16:9, 16:10, ultrawide) without outer scrollbars, the engine evaluates candidate row counts $r \in [1, N]$:
+  1. For each candidate $r$, compute base columns $q = \lfloor N / r \rfloor$ and remainder $m = N \pmod r$.
+  2. Define per-row column counts $c_i$ for each row $i \in [0, r - 1]$:
+     $$c_i = \begin{cases} q + 1 & \text{if } i < m \\ q & \text{otherwise} \end{cases}$$
+     guaranteeing $\sum_{i=0}^{r-1} c_i = m(q + 1) + (r - m)q = N$.
+  3. Compute individual tile aspect ratios $\alpha_i = \frac{W \cdot r}{H \cdot c_i}$ for each row $i$.
+  4. Score candidate $r$ against target reading aspect ratio ($\alpha_{\text{target}} \approx 1.4$) with symmetry weighting:
+     $$\text{score}(r) = \frac{1}{r} \sum_{i=0}^{r-1} \left|\ln\left(\frac{\alpha_i}{\alpha_{\text{target}}}\right)\right| + 0.25 \cdot \mathbf{1}_{m > 0} + 0.1 \cdot \frac{m}{r}$$
+  5. Optimal row count $R = \arg\min_{r \in [1, N]} \text{score}(r)$ with row partition $[c_0, \dots, c_{R-1}]$.
+     * On 16:9 displays ($W/H = 1.777$), this deterministically yields:
+       * $N = 1 \implies [1]$
+       * $N = 2 \implies [2]$
+       * $N = 3 \implies [3]$
+       * $N = 4 \implies [2, 2]$
+       * $N = 5 \implies [3, 2]$
+       * $N = 6 \implies [3, 3]$ ($3 \times 2$)
+       * $N = 7 \implies [4, 3]$
+       * $N = 8 \implies [4, 4]$ ($4 \times 2$)
+       * $N = 9 \implies [3, 3, 3]$ ($3 \times 3$)
+       * $N = 10 \implies [4, 3, 3]$
+       * $N = 12 \implies [4, 4, 4]$ ($4 \times 3$)
+  6. Compute slot bounds for slot at row $r \in [0, R - 1]$ and column $k \in [0, c_r - 1]$:
+     $$h_r = \frac{H - \text{header\_height} - (R - 1)g - 2p}{R}, \quad w_{r, k} = \frac{W - (c_r - 1)g - 2p}{c_r}$$
+     $$x_{r, k} = p + k \cdot (w_{r, k} + g), \quad y_{r, k} = \text{header\_height} + p + r \cdot (h_r + g)$$
+  7. In full-bleed mode ($p = 0, g = 0, \text{header\_height} = 0$), each tile expands to exact fractional bounds:
      $$w_{r, k} = \frac{W}{c_r}, \quad h_r = \frac{H}{R}, \quad x_{r, k} = k \cdot \frac{W}{c_r}, \quad y_{r, k} = r \cdot \frac{H}{R}$$
      $$\sum_{r=0}^{R-1} c_r \cdot \left(\frac{W}{c_r} \cdot \frac{H}{R}\right) = W \cdot H \quad (100\% \text{ client area, zero scrollbars})$$
 ### 4.2 Native Child Webview Realities & Portable Fallbacks
@@ -295,9 +309,8 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
     "dot_url": "tls://dns.adguard-dns.com",
     "plain_dns_ip": "94.140.14.14:53"
   },
-  "pool": {
-    "active_pool_size": 5,
-    "prefetch_buffer_size": 1
+  "limits": {
+    "max_resident_webviews": 12
   },
   "endpoints": [
     {
@@ -346,16 +359,15 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
 
 ---
 
-## 7. Bounded Webview Pool & Lifecycle Management
+## 7. Webview Concurrency & Resource Safety
 
-1. **Preset Baseline ($N = 5$)**: For the default 5 presets running in the $3 \times 2$ grid layout ($M = 5$), all 5 webviews are active and resident simultaneously. There are no additional offscreen webviews to pre-load for this baseline preset.
-2. **Virtualization on Overflow**: If a user configures more endpoints than visible grid slots (e.g. 10 or 20 URLs), the active webview pool is capped at $M$ visible slots plus an optional $K = 1$ buffer. Endpoints beyond $M + K$ remain virtualized as URL records in memory and are navigated onto existing webview slots dynamically as the tour progresses.
+1. **Full-Resident Grid ($M = N$)**: To satisfy the requirement that all configured websites appear simultaneously in a single window without scrolling, all $N$ configured endpoints are allocated resident native webviews in the grid.
+2. **Safety Ceiling (`max_resident_webviews`)**: OS webview instances consume memory and GPU compositing contexts. The runtime enforces a configurable safety ceiling (`max_resident_webviews: 12`, configurable up to 16) validated at startup and config load. Configurations specifying $N > \text{max_resident_webviews}$ return an explicit validation error to prevent system thrashing or compositor crashes.
 3. **In-Flight Reload Bounding**: At most one webview reload may be in flight at any given moment (the upcoming target tile).
 4. **Concurrency & Event Loop Model**:
    * OS webview runtimes (WebKit / WebView2) manage their own internal helper processes and rendering threads; Tauri does not allocate an OS thread per site.
    * Native webview creation, destruction, and coordinate bounds mutations must execute on the OS main thread (mandated by AppKit on macOS and Win32 on Windows).
    * Tour timing, state machine transitions, readiness timeouts, and the local DNS-forwarding proxy run asynchronously on Tokio background tasks without blocking UI responsiveness.
-
 ---
 
 ## 8. Adblocking DNS Engine (Architectural Proposal / Phase 0 Spike)
