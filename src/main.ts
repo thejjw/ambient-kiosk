@@ -142,7 +142,7 @@ function initHudWindow() {
   async function openSettings() {
     settingsDrawer.classList.remove("hidden");
     showHud();
-    await currentWindow.setSize(new LogicalSize(window.innerWidth, Math.max(window.innerHeight, 900)));
+    await currentWindow.setSize(new LogicalSize(window.innerWidth, Math.min(900, window.screen.availHeight || 900)));
     loadConfigIntoDrawer();
   }
 

@@ -174,9 +174,7 @@ pub fn run() {
 
             // 2. Compute full-bleed layout for main coordinator window
             let window = app.get_window("main").expect("Window 'main' must exist");
-            if cfg.window.fullscreen {
-                let _ = window.set_fullscreen(true);
-            }
+            let _ = window.set_fullscreen(cfg.window.fullscreen);
             let _ = window.set_decorations(cfg.window.decorations);
             if let Some((r, g, b, a)) = config::parse_hex_color(&cfg.window.background_color) {
                 let _ = window.set_background_color(Some(tauri::window::Color(r, g, b, a)));

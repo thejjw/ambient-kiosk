@@ -350,9 +350,17 @@ pub fn validate_kiosk_config(config: &KioskConfig) -> Result<(), String> {
         }
         match url::Url::parse(&ep.url) {
             Ok(parsed) => {
-                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                let has_scheme_delimiter = ep.url.contains("://");
+                let has_valid_host = parsed
+                    .host_str()
+                    .map(|h| !h.trim().is_empty())
+                    .unwrap_or(false);
+                if (parsed.scheme() != "http" && parsed.scheme() != "https")
+                    || !has_scheme_delimiter
+                    || !has_valid_host
+                {
                     return Err(format!(
-                        "Configuration error: endpoint '{}' URL '{}' must use http or https scheme.",
+                        "Configuration error: endpoint '{}' URL '{}' must be an absolute http or https URL with a valid host.",
                         ep.title, ep.url
                     ));
                 }
@@ -855,11 +863,21 @@ mod tests {
         let err = validate_kiosk_config(&bad_title_cfg).unwrap_err();
         assert!(err.contains("has an empty title"));
 
-        // 2. Invalid URL scheme validation (file:, javascript:, etc.)
+        // 2. Invalid URL scheme or missing host validation (file:, javascript:, https:, http:/path)
         let mut bad_scheme_cfg = KioskConfig::default();
         bad_scheme_cfg.endpoints[0].url = "file:///etc/passwd".into();
         let err = validate_kiosk_config(&bad_scheme_cfg).unwrap_err();
-        assert!(err.contains("must use http or https scheme"));
+        assert!(err.contains("must be an absolute http or https URL"));
+
+        let mut no_host_cfg = KioskConfig::default();
+        no_host_cfg.endpoints[0].url = "https:".into();
+        let err = validate_kiosk_config(&no_host_cfg).unwrap_err();
+        assert!(err.contains("has an invalid URL"));
+
+        let mut path_only_cfg = KioskConfig::default();
+        path_only_cfg.endpoints[0].url = "http:/path/only".into();
+        let err = validate_kiosk_config(&path_only_cfg).unwrap_err();
+        assert!(err.contains("must be an absolute http or https URL"));
 
         let mut unparseable_cfg = KioskConfig::default();
         unparseable_cfg.endpoints[0].url = "not a valid url".into();
