@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-tour"
+description = "Enables the resume_tour command without any pre-configured scope."
+commands.allow = ["resume_tour"]
+
+[[permission]]
+identifier = "deny-resume-tour"
+description = "Denies the resume_tour command without any pre-configured scope."
+commands.deny = ["resume_tour"]

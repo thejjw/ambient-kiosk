@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-next-tile"
+description = "Enables the next_tile command without any pre-configured scope."
+commands.allow = ["next_tile"]
+
+[[permission]]
+identifier = "deny-next-tile"
+description = "Denies the next_tile command without any pre-configured scope."
+commands.deny = ["next_tile"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-tour-status"
+description = "Enables the get_tour_status command without any pre-configured scope."
+commands.allow = ["get_tour_status"]
+
+[[permission]]
+identifier = "deny-get-tour-status"
+description = "Denies the get_tour_status command without any pre-configured scope."
+commands.deny = ["get_tour_status"]

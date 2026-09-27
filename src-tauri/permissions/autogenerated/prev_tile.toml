@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-prev-tile"
+description = "Enables the prev_tile command without any pre-configured scope."
+commands.allow = ["prev_tile"]
+
+[[permission]]
+identifier = "deny-prev-tile"
+description = "Denies the prev_tile command without any pre-configured scope."
+commands.deny = ["prev_tile"]
