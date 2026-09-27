@@ -61,7 +61,7 @@ ambient-kiosk/
 ## Prerequisites & Cross-Platform Build Guide
 
 * **Rust & Cargo**: >= 1.90 (`rustc --version`)
-* **Bun**: >= 1.0 (`bun --version`) or Node.js >= 20
+* **Bun**: >= 1.0 (`bun --version`) — required runtime and package manager (invoked by Tauri build scripts and project lockfile).
 * **Official Reference**: Consult the [Tauri v2 Prerequisites Guide](https://v2.tauri.app/start/prerequisites/) for official distribution setup details.
 
 ### OS-Specific Build Requirements:
