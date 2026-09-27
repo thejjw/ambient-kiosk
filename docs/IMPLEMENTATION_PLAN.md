@@ -28,8 +28,9 @@ This document outlines the step-by-step implementation roadmap for building **Am
   2. **Controller HUD & Occlusion**:
      * Prove HUD visibility using a reserved $40\,\text{px}$ top bar ($y \in [0, 40]$) versus a secondary frameless overlay window with `always_on_top(true)`.
   3. **Pipelined JIT Reload & PreparingNext Readiness**:
-     * Execute background `next_webview.reload()` during minimizing animation with reload coalescing (max 1 in-flight reload).
-     * Test `PreparingNext` state: verify advance on `on_page_load(Finished)`. On timeout (2.5s) or failure, verify skip-expansion behavior (retain resting slot, advance to next candidate without maximizing incomplete content).
+     * Trigger background `next_webview.reload()` on idle view, mark pending reload, and handle the first subsequent `on_page_load(Finished)` event.
+     * Validate internal `tour_generation: u64` token to invalidate stale timeout tasks and state transitions.
+     * Test `PreparingNext` state: verify advance on `Finished` event, evaluate cross-navigation/redirect race handling, and verify timeout (2.5s) skips expansion leaving view unmaximized in its resting slot.
   4. **Adblocking DNS Smoke Test**:
      * Test local HTTP/SOCKS5 proxy routing webview traffic through AdGuard DoH (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (`94.140.14.14:53`) via `WebviewBuilder.proxy_url()`.
      * Verify macOS WKWebView proxy behavior and evaluate stability across macOS versions.
@@ -66,6 +67,8 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Routes DNS queries to AdGuard DoH/DoT/UDP.
   * Exposes local HTTP/SOCKS5 proxy on `127.0.0.1:<port>` when `adblock_dns_enabled` is active.
 * Implement asymmetric grid geometry calculator:
+  * 3/2 box layout for $N = 5$ (Row 0: 3 columns, Row 1: 2 columns).
+  * Respects reserved $40\,\text{px}$ header zone for controller HUD.
 * Implement bounded webview pool manager:
   * For baseline $N = 5$, maintain all 5 visible webviews resident simultaneously.
   * Apply virtualization and slot re-navigation only when configured URLs exceed visible slots ($M = 5$).
@@ -84,10 +87,10 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Timer loop updating bounds of focused webview from resting slot to $(0, 0, W, H)$.
   * Sibling-hide fallback: hide sibling webviews during maximization, restore on minimizing completion.
 * Implement JIT Pre-Refresh Trigger & PreparingNext State:
-  * Upon entering `Minimizing(i)`, invoke `next_webview.reload()` natively (coalesced to 1 in-flight request).
+  * Upon entering `Minimizing(i)`, verify target webview is idle, mark pending reload, invoke `next_webview.reload()`, and increment internal `tour_generation: u64`.
   * Upon completing minimization, transition to `PreparingNext(i + 1)`.
-  * Wait for `on_page_load(Finished)` event: on completion, advance to `GridRest` and `Maximizing(i + 1)`.
-  * On timeout (2.5s safety limit) or load failure: skip maximization for this cycle, retain existing slot content, and advance to prepare candidate $i + 2$.
+  * Await the first `on_page_load(Finished)` on the pending view: on arrival, clear pending flag, advance to `GridRest` and `Maximizing(i + 1)`.
+  * On timeout (2.5s safety limit, checked against current `tour_generation`) or load failure: leave the incomplete view unmaximized in its resting slot, clear pending flag, and advance to prepare candidate $i + 2$.
   * Hold timer (e.g. 30 seconds).
   * Advance active index: $i_{\text{next}} = (i + 1) \pmod N$.
 * Expose control commands:

@@ -149,8 +149,8 @@ To update headlines and charts before expansion:
    // Rust controller triggers native background reload on upcoming target
    next_webview.reload().ok();
    ```
-2. **Reload Coalescing**: Only one reload request per webview may be in flight at any time. Duplicate triggers while a reload is pending are ignored.
-3. **Phase 0 Validation & Timeout Handling**: A fixed transition window cannot guarantee that heavy news sites (such as AP News or Finviz) will finish loading over slower networks. Therefore, the tour coordinator introduces an explicit `PreparingNext` state driven by `on_page_load(Finished)` with a bounded safety timeout (e.g. 2500ms). If the timeout elapses or load fails, the engine does not maximize a blank or half-rendered view; it skips expansion for that cycle, retains the prior content in its grid slot, and advances to prepare the next candidate.
+2. **Reload Lifecycle & Pending Flag**: Because Tauri's `PageLoadPayload` reports only target URL and `PageLoadEvent` without request or generation IDs, individual load events cannot be tagged at the API boundary. The coordinator enforces safe reloading by only triggering `reload()` on an idle view, marking that target webview as `pending_reload`, and accepting the first subsequent `PageLoadEvent::Finished`.
+3. **Tour Generation Tokens & Timeout Handling**: An internal `tour_generation: u64` token is maintained by the tour controller solely to invalidate stale timeout callbacks and ignore delayed state transitions from previous cycles. If the safety timeout (e.g. 2500ms) elapses or load fails before `Finished` arrives, the engine clears the pending flag, leaves the incomplete view unmaximized in its resting slot, skips expansion for that cycle, and advances to prepare candidate $i + 2$. Handling cross-navigation redirects and race conditions is evaluated in the Phase 0 feasibility spike.
 
 ## 5. Tour Engine & State Machine
 
@@ -190,7 +190,7 @@ To update headlines and charts before expansion:
                              | load_done                               |
                              |---------------------------------------->|
                              | timeout (2.5s) / error                  |
-                             | (skip expansion, retain slot)           |
+                             | (leave unmaximized in slot)             |
                              +---------------------------------------->| (advance to index + 2)
                                            index = (i + 1) % N
 ```
@@ -201,9 +201,9 @@ To update headlines and charts before expansion:
 * **`Maximizing(i)`**: Animating bounds of webview $i$ from resting to full viewport.
 * **`Maximized(i)`**: Webview $i$ fully expanded. Hold timer active (e.g., 30 seconds).
 * **`Minimizing(i)`**: Animating bounds of webview $i$ from full viewport back to resting slot. Triggers `next_webview.reload()`.
-* **`PreparingNext(target)`**: Transitional state between minimization and the next maximization. Monitors target webview for page-load completion via `on_page_load(Finished)`.
-  * **On load finish**: Advances to `GridRest` and then `Maximizing(target)`.
-  * **On timeout (2.5s) or load error**: Does not expand a blank/unrendered page. Skips maximization for this cycle, keeps existing slot content, and advances to the next candidate.
+* **`PreparingNext(target)`**: Transitional state between minimization and the next maximization. Awaits the first `on_page_load(Finished)` event for the pending target webview while guarding against stale timeouts via an internal `tour_generation` token.
+  * **On load finish**: Clears pending reload flag, advances to `GridRest` and then `Maximizing(target)`.
+  * **On timeout (2.5s) or load error**: Leaves the incomplete webview unmaximized in its resting slot, clears pending reload flag, skips expansion for this cycle, and advances to prepare candidate $i + 2$.
 * **`Paused`**: Tour timer paused via keyboard shortcut (`Space`) or manual HUD control. Resumes upon unpause.
 ---
 
