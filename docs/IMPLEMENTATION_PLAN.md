@@ -133,11 +133,11 @@ This document outlines the step-by-step implementation roadmap for building **Am
 
 ## Cross-Platform Implementation Guide (Windows & Linux)
 
-This guide specifies how to tackle Windows and Linux compilation, testing, and deployment, highlighting what core components work out-of-the-box, where platform divergences exist, and what specific work is required for implementors on each target operating system.
+This guide specifies how to tackle Windows and Linux compilation, testing, and deployment, highlighting which core components share portable implementations, where platform divergences exist, and what specific work is required for implementors on each target operating system.
 
 ### 1. Core Cross-Platform Capabilities (Shared Implementation / Expected Portable)
 
-The following core modules are implemented using standard, portable Rust and cross-platform Tauri v2 APIs that require no architectural changes for Windows or Linux:
+The following core modules are implemented using standard, portable Rust and cross-platform Tauri v2 APIs that share common logic across Windows, Linux, and macOS (pending target-native smoke verification, with platform-specific windowing and input integration addressed in Section 2):
 
 * **Configuration & Precedence Engine (`src-tauri/src/config.rs`)**:
   * Resolves configuration hierarchy (`CLI > Portable > AppData > Defaults`) uniformly.

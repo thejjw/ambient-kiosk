@@ -401,6 +401,6 @@ To achieve app-scoped DNS adblocking without altering the user's system-wide net
 | **Per-Webview Proxy Routing** | Native support (macOS 14+ with `macos-proxy` feature) | Native support in WebView2 | Native support in WebKitGTK |
 | **Click-Through Windowing** | `set_ignore_cursor_events: true` via AppKit | `set_ignore_cursor_events: true` via Win32 | `set_ignore_cursor_events: true` via Gtk/X11 |
 | **HUD Overlay Transparency** | Supported with `macOSPrivateApi: true` and `macos-private-api` Cargo feature | Supported natively by WebView2 | Requires active EWMH compositor (Mutter, KWin, Picom); black on non-composited WMs |
-| **Global Shortcuts Subsystem** | Carbon event monitor via `global-hotkey` | Win32 `RegisterHotKey` via `global-hotkey` | X11 supported via `x11rb`; Wayland requires on-screen HUD buttons or XDG portal |
+| **Global Shortcuts Subsystem** | Carbon event monitor via `global-hotkey` | Win32 `RegisterHotKey` via `global-hotkey` | X11 supported via `x11rb`; pure Wayland requires an implemented always-accessible control path or XDG portal integration |
 | **Desktop Coordinates** | Top-left desktop physical pixels (`cursor_position` matching `outer_position`) | Per-Monitor V2 physical pixels matching `outer_position` | X11/XWayland root window physical pixels |
 | **Console Window Behavior** | Native GUI bundle without console | Suppressed via `#![cfg_attr(..., windows_subsystem = "windows")]` | Native ELF GUI process |
