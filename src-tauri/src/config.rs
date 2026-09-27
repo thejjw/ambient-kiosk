@@ -389,22 +389,29 @@ pub fn write_config_atomic(path: &Path, config: &KioskConfig) -> Result<(), Stri
     fs::rename(&tmp_path, path).map_err(|e| format!("Failed to finalize config file: {}", e))?;
     Ok(())
 }
-
-// ----------------------------------------------------------------------------
-// Tauri Commands
-// ----------------------------------------------------------------------------
-
-/// Retrieves current active configuration and metadata.
-#[tauri::command]
-pub fn get_config(state: State<Arc<AppConfigState>>) -> Result<ConfigMetaResponse, String> {
-    Ok(state.get_meta())
+/// Helper to parse `--config <path>` or `-c <path>` from arguments iterator.
+pub fn parse_cli_config_arg<I>(args: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config" || arg == "-c" {
+            if let Some(val) = iter.next() {
+                return Some(PathBuf::from(val));
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--config=") {
+            return Some(PathBuf::from(stripped));
+        }
+    }
+    None
 }
 
-/// Saves modified configuration. Enforces shadowing protection and endpoint count limits.
-#[tauri::command]
-pub fn save_config(
+/// Core production validation and persistence logic for saving configuration.
+/// Enforces shadowing protection and endpoint count limits against max_resident_webviews.
+pub fn validate_and_save_config(
+    state: &AppConfigState,
     new_config: KioskConfig,
-    state: State<Arc<AppConfigState>>,
 ) -> Result<(), String> {
     let current_meta = state.get_meta();
 
@@ -436,6 +443,25 @@ pub fn save_config(
     });
 
     Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Tauri Commands
+// ----------------------------------------------------------------------------
+
+/// Retrieves current active configuration and metadata.
+#[tauri::command]
+pub fn get_config(state: State<Arc<AppConfigState>>) -> Result<ConfigMetaResponse, String> {
+    Ok(state.get_meta())
+}
+
+/// Saves modified configuration. Enforces shadowing protection and endpoint count limits.
+#[tauri::command]
+pub fn save_config(
+    new_config: KioskConfig,
+    state: State<Arc<AppConfigState>>,
+) -> Result<(), String> {
+    validate_and_save_config(&state, new_config)
 }
 
 /// Exports configuration to an arbitrary user-specified destination path.
@@ -531,38 +557,116 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cli_config_arg() {
+        assert_eq!(
+            parse_cli_config_arg(vec!["app".into(), "--config".into(), "/tmp/cfg.json".into()]),
+            Some(PathBuf::from("/tmp/cfg.json"))
+        );
+        assert_eq!(
+            parse_cli_config_arg(vec!["app".into(), "--config=/tmp/cfg2.json".into()]),
+            Some(PathBuf::from("/tmp/cfg2.json"))
+        );
+        assert_eq!(
+            parse_cli_config_arg(vec!["app".into(), "-c".into(), "/tmp/cfg3.json".into()]),
+            Some(PathBuf::from("/tmp/cfg3.json"))
+        );
+        assert_eq!(
+            parse_cli_config_arg(vec!["app".into(), "--verbose".into()]),
+            None
+        );
+    }
+
+    #[test]
     fn test_shadowing_rejection() {
         let temp = TempDirGuard::new("shadowing");
         let appdata_dir = temp.path.join("appdata");
 
-        // Simulate active portable config
-        let meta = ConfigMetaResponse {
+        // 1. Portable source: validate_and_save_config must reject
+        let meta_port = ConfigMetaResponse {
             config: KioskConfig::default(),
             source: ConfigSource::Portable,
             is_readonly: true,
             resolved_path: "/dummy/kiosk-config.json".into(),
         };
-
-        let state = AppConfigState::new(meta, appdata_dir.clone());
+        let state_port = AppConfigState::new(meta_port, appdata_dir.clone());
         let mut new_config = KioskConfig::default();
         new_config.timing.grid_view_duration_ms = 99999;
 
-        // When state is readonly, save must fail
-        let current = state.get_meta();
-        assert!(current.is_readonly);
+        let err_port = validate_and_save_config(&state_port, new_config.clone()).unwrap_err();
+        assert_eq!(
+            err_port,
+            "Active configuration is locked by a higher-precedence Portable source (/dummy/kiosk-config.json). In-place saving is disabled to prevent silent shadowing. Use export_config instead."
+        );
 
-        let res = if current.is_readonly {
-            Err("Locked by portable source".to_string())
-        } else {
-            Ok(())
+        // 2. CLI source: validate_and_save_config must reject
+        let meta_cli = ConfigMetaResponse {
+            config: KioskConfig::default(),
+            source: ConfigSource::Cli,
+            is_readonly: true,
+            resolved_path: "/dummy/cli.json".into(),
         };
-        assert!(res.is_err(), "Saving over locked portable config must fail");
+        let state_cli = AppConfigState::new(meta_cli, appdata_dir.clone());
+        let err_cli = validate_and_save_config(&state_cli, new_config).unwrap_err();
+        assert_eq!(
+            err_cli,
+            "Active configuration is locked by a higher-precedence CLI source (/dummy/cli.json). In-place saving is disabled to prevent silent shadowing. Use export_config instead."
+        );
     }
 
     #[test]
     fn test_limits_validation() {
-        let mut cfg = KioskConfig::default();
-        cfg.limits.max_resident_webviews = 2;
-        assert!(cfg.endpoints.len() > cfg.limits.max_resident_webviews);
+        let temp = TempDirGuard::new("limits");
+        let appdata_dir = temp.path.join("appdata");
+
+        let meta = ConfigMetaResponse {
+            config: KioskConfig::default(),
+            source: ConfigSource::Defaults,
+            is_readonly: false,
+            resolved_path: "<defaults>".into(),
+        };
+        let state = AppConfigState::new(meta, appdata_dir);
+
+        let mut new_config = KioskConfig::default();
+        new_config.limits.max_resident_webviews = 2; // 5 endpoints > 2 limit
+
+        let err = validate_and_save_config(&state, new_config).unwrap_err();
+        assert_eq!(
+            err,
+            "Configured endpoints count (5) exceeds max_resident_webviews limit (2)."
+        );
+    }
+
+    #[test]
+    fn test_successful_save_to_appdata() {
+        let temp = TempDirGuard::new("successful_save");
+        let appdata_dir = temp.path.join("appdata");
+
+        let meta = ConfigMetaResponse {
+            config: KioskConfig::default(),
+            source: ConfigSource::Defaults,
+            is_readonly: false,
+            resolved_path: "<defaults>".into(),
+        };
+        let state = AppConfigState::new(meta, appdata_dir.clone());
+
+        let mut new_config = KioskConfig::default();
+        new_config.timing.grid_view_duration_ms = 77777;
+
+        // Execute save
+        let res = validate_and_save_config(&state, new_config);
+        assert!(res.is_ok(), "Saving to AppData must succeed");
+
+        // Verify file was written to disk atomically
+        let written_file = appdata_dir.join("config.json");
+        assert!(written_file.is_file(), "config.json must exist in appdata dir");
+        let content = fs::read_to_string(&written_file).unwrap();
+        let parsed: KioskConfig = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.timing.grid_view_duration_ms, 77777);
+
+        // Verify in-memory state updated
+        let updated_meta = state.get_meta();
+        assert_eq!(updated_meta.source, ConfigSource::AppData);
+        assert!(!updated_meta.is_readonly);
+        assert_eq!(updated_meta.config.timing.grid_view_duration_ms, 77777);
     }
 }

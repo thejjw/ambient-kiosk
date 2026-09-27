@@ -3,22 +3,6 @@ pub mod config;
 use std::sync::Arc;
 use tauri::Manager;
 
-#[tauri::command]
-fn start_tour() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn pause_tour() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn resume_tour() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn next_tile() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn prev_tile() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn toggle_fullscreen() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn minimize_current() -> Result<(), String> { Ok(()) }
-#[tauri::command]
-fn get_tour_status() -> Result<(), String> { Ok(()) }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -29,8 +13,13 @@ pub fn run() {
                 .app_config_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("config"));
 
+            let cli_config_path = config::parse_cli_config_arg(std::env::args());
             let exe_path = std::env::current_exe().ok();
-            let meta = config::resolve_configuration(None, exe_path.as_deref(), &app_data_dir);
+            let meta = config::resolve_configuration(
+                cli_config_path.as_deref(),
+                exe_path.as_deref(),
+                &app_data_dir,
+            );
             let state = Arc::new(config::AppConfigState::new(meta, app_data_dir));
             app.manage(state);
 
@@ -40,14 +29,6 @@ pub fn run() {
             config::get_config,
             config::save_config,
             config::export_config,
-            start_tour,
-            pause_tour,
-            resume_tour,
-            next_tile,
-            prev_tile,
-            toggle_fullscreen,
-            minimize_current,
-            get_tour_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

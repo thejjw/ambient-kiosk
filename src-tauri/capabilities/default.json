@@ -13,14 +13,6 @@
     "core:window:allow-set-fullscreen",
     "allow-get-config",
     "allow-save-config",
-    "allow-export-config",
-    "allow-start-tour",
-    "allow-pause-tour",
-    "allow-resume-tour",
-    "allow-next-tile",
-    "allow-prev-tile",
-    "allow-toggle-fullscreen",
-    "allow-minimize-current",
-    "allow-get-tour-status"
+    "allow-export-config"
   ]
 }
