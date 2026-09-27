@@ -143,14 +143,13 @@ where remainder slots in the final row can either stretch across available width
 
 ### 4.3 Just-In-Time Pre-Refresh (Pipelined Reloading)
 To ensure that headlines and live charts are fresh without exposing the user to mid-tour loading spinners:
-1. **Trigger Moment**: When active tile $i$ finishes its hold duration and begins its `Minimizing` transition, the controller immediately fires a background reload command to tile $i+1$:
+1. **Trigger Moment**: When active tile $i$ finishes its hold duration and begins its `Minimizing` transition, the controller fires a native background reload command on tile $i+1$:
    ```rust
-   // Rust controller triggers background refresh on upcoming target
-   next_webview.eval("window.location.reload()").ok();
+   // Rust controller triggers native background reload on upcoming target
+   next_webview.reload().ok();
    ```
-2. **Pipelined Window**: Tile $i+1$ performs network fetch, HTML parsing, and DOM layout reflow while tile $i$ minimizes ($500\,\text{ms}$) and while the grid pauses during `GridRest` ($1500\text{--}2000\,\text{ms}$).
-3. **Result**: When tile $i+1$ starts expanding, its content is fully rendered and up to date, eliminating visible layout reflows during the zoom animation.
-
+2. **Pipelined Window & Hypothesis**: Tile $i+1$ performs network fetch, HTML parsing, and DOM layout reflow while tile $i$ minimizes ($500\,\text{ms}$) and while the tour coordinator enters `PreparingNext` / `GridRest` ($1500\text{--}2000\,\text{ms}$).
+3. **Phase 0 Validation**: This reloading pipeline is an architectural hypothesis subject to empirical validation in the Phase 0 feasibility spike. If network latency exceeds the transition window, an explicit load-finished event or readiness timeout prevents expanding into a blank or partially reflowed page.
 ---
 
 ## 5. Tour Engine & State Machine
@@ -180,9 +179,15 @@ To ensure that headlines and live charts are fresh without exposing the user to 
   |                          v                                         |
   +---------- +-----------------------------+                          |
    (paused)   |      Minimizing(index)      |                          |
-              |  * JIT RELOAD (index + 1) * |                          |
+              |  * next_webview.reload() *  |                          |
               +-----------------------------+                          |
                              | anim_complete                           |
+                             v                                         |
+              +-----------------------------+                          |
+              |    PreparingNext(index + 1) |                          |
+              | (Wait on load_done | timeout)|                         |
+              +-----------------------------+                          |
+                             | load_done OR timeout (e.g. 2.5s)        |
                              +-----------------------------------------+
                                            index = (i + 1) % N
 ```
@@ -192,7 +197,8 @@ To ensure that headlines and live charts are fresh without exposing the user to 
 * **`GridRest`**: Brief pause showing the entire grid before the next expansion begins.
 * **`Maximizing(i)`**: Animating bounds of webview $i$ from resting to full viewport.
 * **`Maximized(i)`**: Webview $i$ fully expanded. Hold timer active (e.g., 30 seconds).
-* **`Minimizing(i)`**: Animating bounds of webview $i$ from full viewport back to resting.
+* **`Minimizing(i)`**: Animating bounds of webview $i$ from full viewport back to resting slot. Triggers `next_webview.reload()`.
+* **`PreparingNext(target)`**: Transitional state between minimization and the next maximization. Monitors target webview for page-load completion or elapses a configurable safety timeout (e.g. 2500ms) before advancing to `GridRest` and `Maximizing(target)`.
 * **`Paused`**: Tour timer paused due to explicit user interaction (click, scroll, mouse movement inside the maximized view) or user manual pause. Resumes after idle timeout.
 
 ---
@@ -235,27 +241,27 @@ Configuration is persisted locally (e.g., in `$APP_CONFIG_DIR/config.json`) and 
 
 ## 7. Bounded Webview Pool & Lifecycle Management
 
-To prevent unbounded thread creation, memory bloat, and GPU process crashes when users configure dozens of sites:
+To prevent unbounded OS webview process proliferation, GPU context exhaustion, and memory bloat when users configure dozens of sites:
 1. **Active Pool Cap**: The runtime maintains at most $M$ active webview instances matching the visible grid layout (e.g., $M = 5$ for the 3/2 preset) plus an optional $K = 1$ prefetch buffer for upcoming offscreen sites.
 2. **Virtualization**: Additional endpoints beyond $M + K$ remain virtualized as URL records in memory.
-3. **Thread Architecture**:
-   * OS event loop and native webview message processing execute on the OS main thread (as required by AppKit and Win32).
-   * Tour timing, coordinate calculations, and DNS proxy forwarding run on asynchronous Tokio background worker threads, preventing UI lockups.
+3. **Concurrency & Event Loop Model**:
+   * Native webview creation, destruction, and coordinate bounds mutations must execute on the OS main thread (mandated by AppKit on macOS and Win32 on Windows). Tauri handles webview window messages on this thread.
+   * Tour timing, state machine transitions, readiness timeouts, and the local DNS-forwarding proxy run asynchronously on Tokio background tasks without blocking UI responsiveness.
 
 ---
 
-## 8. Adblocking DNS Engine
+## 8. Adblocking DNS Engine (Architectural Proposal / Phase 0 Spike)
 
 News aggregators and financial portals (e.g. AP News, Biztoc, Finviz) serve aggressive banner networks, video ads, and analytics beacons that degrade kiosk legibility and waste bandwidth.
 
 ### 8.1 Integration Mechanism
 Operating system webviews (WebKit on macOS, WebView2 on Windows) rely on OS-level DNS resolution and do not support traditional browser adblock extensions.
 
-Ambient Kiosk applies network-level adblocking using **AdGuard DNS**:
+Ambient Kiosk evaluates network-level adblocking using **AdGuard DNS**:
 1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (HTTP / SOCKS5) on `127.0.0.1:<ephemeral_port>`.
 2. **DNS Routing**:
    * **Primary: DNS-over-HTTPS (DoH)**: Queries resolved via `https://dns.adguard-dns.com/dns-query`.
    * **Secondary: DNS-over-TLS (DoT)**: Queries resolved via `tls://dns.adguard-dns.com`.
    * **Fallback: Plain DNS**: Direct UDP/TCP queries to AdGuard resolver `94.140.14.14:53`.
-3. **Tauri Webview Attachment**: Each child `WebviewBuilder` is initialized with `.proxy_url("http://127.0.0.1:<port>")` pointing to the local proxy.
-4. **User Opt-In / System DNS**: A configuration toggle `adblock_dns_enabled` permits switching back to standard system DNS resolution without proxy overhead.
+3. **Tauri Webview Attachment**: Child `WebviewBuilder` instances are configured with `.proxy_url("http://127.0.0.1:<port>")`.
+4. **Feasibility Validation & Fallback**: Setting `proxy_url` on macOS WKWebView is subject to platform version requirements (macOS 14+) and will be validated in the Phase 0 spike. If proxying proves unstable on target platforms, the fallback is a configuration toggle allowing users to opt into system-level DNS adblocking (`94.140.14.14`).

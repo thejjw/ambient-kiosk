@@ -27,9 +27,9 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
    * **Zero IPC Capabilities**: Remote URLs are never mapped to Tauri command capabilities; untrusted guest scripts cannot call native Rust APIs or access the host filesystem.
    * **Navigation Restrictions (`on_navigation`)**: Prevents untrusted guest pages from navigating to unauthorized origins or protocols (`file://`, `tauri://`).
    * **Popup Suppression (`on_new_window`)**: Intercepts `window.open` and `<a target="_blank">` to prevent rogue window breakouts.
-4. **Just-In-Time Pre-Refresh**: While the active tile minimizes, the upcoming tile triggers a background refresh (`window.location.reload()`), ensuring fresh headlines upon expansion without mid-tour loading spinners.
-5. **Bounded Lifecycle Pool**: Caps active child webviews to visible slots ($M = 5$) plus a bounded prefetch buffer ($K = 1$), avoiding runaway thread and memory allocation.
-6. **AdGuard DNS Adblocking**: Integrated DNS-over-HTTPS proxy (`https://dns.adguard-dns.com/dns-query`) filters banner ads and trackers across news sites natively.
+4. **Pipelined Pre-Refresh (Planned)**: Design initiates a native background reload (`Webview::reload()`) on the upcoming tile during minimization to pipeline content updates before expansion (readiness and fallback behavior subject to Phase 0 feasibility spike).
+5. **Bounded Lifecycle Pool**: Caps active child webviews to visible slots ($M = 5$) plus a bounded prefetch buffer ($K = 1$), avoiding runaway webview process count and memory consumption.
+6. **AdGuard DNS Adblocking (Planned / Spike)**: Proposed architecture routes child webview network requests through a local loopback proxy resolving via AdGuard DNS-over-HTTPS (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (feasibility across macOS WKWebView/WebView2 subject to Phase 0 spike).
 ---
 
 ## Documentation

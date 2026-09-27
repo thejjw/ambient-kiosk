@@ -27,11 +27,13 @@ This document outlines the step-by-step implementation roadmap for building **Am
      * Verify smooth restoration (`webview1.show()`) upon return to resting bounds.
   2. **Controller HUD & Occlusion**:
      * Prove HUD visibility using a reserved $40\,\text{px}$ top bar ($y \in [0, 40]$) versus a secondary frameless overlay window with `always_on_top(true)`.
-  3. **Pipelined JIT Reload**:
-     * Execute background `next_webview.eval("window.location.reload()")` during minimizing animation; verify page finishes painting prior to the next expansion.
+  3. **Pipelined JIT Reload & Readiness**:
+     * Execute background `next_webview.reload()` during minimizing animation.
+     * Validate page readiness handling via navigation events or an upper-bound timeout (e.g. 2.5s) in a `PreparingNext` state before triggering expansion.
   4. **Adblocking DNS Smoke Test**:
      * Test local proxy routing webview traffic through AdGuard DoH (`https://dns.adguard-dns.com/dns-query`) or plain DNS (`94.140.14.14:53`) via `WebviewBuilder.proxy_url()`.
-* **Verification**: Functional prototype demonstrating bounds animation, sibling hide/show, JIT reload, and ad-filtered remote page loads.
+     * Verify macOS WKWebView proxy behavior and evaluate platform stability.
+* **Verification**: Functional prototype demonstrating bounds animation, sibling hide/show, JIT native reload with timeout fallback, and ad-filtered remote page loads.
 
 ### Phase 1: Tauri v2 Project Scaffolding
 * Initialize Vite + TypeScript project with Bun in `ambient-kiosk`.
@@ -75,14 +77,15 @@ This document outlines the step-by-step implementation roadmap for building **Am
 
 ### Phase 4: Animation & Tour Engine with JIT Pre-Refresh
 * Implement Tour State Machine in Rust:
-  * States: `Stopped`, `GridRest`, `Maximizing(index)`, `Maximized(index)`, `Minimizing(index)`, `Paused`.
+  * States: `Stopped`, `GridRest`, `Maximizing(index)`, `Maximized(index)`, `Minimizing(index)`, `PreparingNext(index)`, `Paused`.
 * Implement Coordinate Interpolator:
   * Cubic ease-in-out curve: $e(t) = 3t^2 - 2t^3$.
   * Timer loop updating bounds of focused webview from resting slot to $(0, 0, W, H)$.
   * Sibling-hide fallback: hide sibling webviews during maximization, restore on minimizing completion.
-* Implement JIT Pre-Refresh Trigger:
-  * Upon entering `Minimizing(i)`, fire `eval("window.location.reload()")` on webview $(i + 1) \pmod N$.
-* Implement Tour Timer:
+* Implement JIT Pre-Refresh Trigger & PreparingNext State:
+  * Upon entering `Minimizing(i)`, invoke `next_webview.reload()` natively.
+  * Upon completing minimization, transition to `PreparingNext(i + 1)`.
+  * Wait for webview page load completion event or elapse a 2.5s safety timeout, then advance to `GridRest` and `Maximizing(i + 1)`.
   * Hold timer (e.g. 30 seconds).
   * Advance active index: $i_{\text{next}} = (i + 1) \pmod N$.
 * Expose control commands:
