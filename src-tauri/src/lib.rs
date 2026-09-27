@@ -1,4 +1,7 @@
 pub mod config;
+pub mod layout;
+pub mod proxy;
+pub mod webview_manager;
 
 use std::sync::Arc;
 use tauri::Manager;

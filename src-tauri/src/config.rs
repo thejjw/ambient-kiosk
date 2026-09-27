@@ -104,9 +104,9 @@ impl Default for NetworkDnsConfig {
         Self {
             adblock_dns_enabled: true,
             dns_provider: "adguard_doh".into(),
-            doh_url: "https://dns.adguard-dns.com/resolve".into(),
+            doh_url: "https://dns.adguard-dns.com/dns-query".into(),
             dot_url: "tls://dns.adguard-dns.com".into(),
-            plain_dns_ip: "94.140.14.14".into(),
+            plain_dns_ip: "94.140.14.14:53".into(),
         }
     }
 }
