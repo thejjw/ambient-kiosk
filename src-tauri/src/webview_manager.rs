@@ -1,7 +1,7 @@
 use crate::config::EndpointItem;
 use crate::layout::LogicalRect;
 use tauri::{
-    webview::{PageLoadEvent, WebviewBuilder},
+    webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder},
     LogicalPosition, LogicalSize, Webview, WebviewUrl, Window,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,8 +17,15 @@ pub struct ManagedWebviewTile {
     pub resting_rect: LogicalRect,
 }
 
+/// Security validation: ensures webviews can only navigate to standard HTTP and HTTPS schemes.
+/// Disallows file:, javascript:, data:, and custom IPC protocols.
+pub fn is_allowed_navigation_scheme(url: &Url) -> bool {
+    url.scheme() == "https" || url.scheme() == "http"
+}
+
 /// Spawns resident child native webviews for all configured endpoints ($M = N$).
-/// Each webview is securely quarantined with zero IPC permissions and constrained navigation.
+/// Each webview is securely quarantined with zero IPC permissions, constrained navigation,
+/// and automatic popup rejection.
 pub fn spawn_resident_webviews(
     window: &Window,
     endpoints: &[EndpointItem],
@@ -53,10 +60,11 @@ pub fn spawn_resident_webviews(
             builder = builder.proxy_url(p_url.clone());
         }
 
-        // Security: Lock navigation strictly to standard web schemes
-        builder = builder.on_navigation(|nav_url| {
-            nav_url.scheme() == "https" || nav_url.scheme() == "http"
-        });
+        // Security Policy 1: Constrain navigation strictly to HTTP/HTTPS
+        builder = builder.on_navigation(|nav_url| is_allowed_navigation_scheme(nav_url));
+
+        // Security Policy 2: Reject all popup windows from guest web content
+        builder = builder.on_new_window(|_url, _features| NewWindowResponse::Deny);
 
         // Event relay for tour engine pre-refresh tracking
         let tx = page_load_tx.clone();
@@ -83,4 +91,20 @@ pub fn spawn_resident_webviews(
     }
 
     Ok(tiles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_navigation_scheme_security() {
+        assert!(is_allowed_navigation_scheme(&Url::parse("https://example.com/").unwrap()));
+        assert!(is_allowed_navigation_scheme(&Url::parse("http://example.com/").unwrap()));
+        assert!(!is_allowed_navigation_scheme(&Url::parse("file:///etc/passwd").unwrap()));
+        assert!(!is_allowed_navigation_scheme(&Url::parse("data:text/html,<html>").unwrap()));
+        assert!(!is_allowed_navigation_scheme(&Url::parse("javascript:alert(1)").unwrap()));
+        assert!(!is_allowed_navigation_scheme(&Url::parse("tauri://localhost").unwrap()));
+        assert!(!is_allowed_navigation_scheme(&Url::parse("custom://malicious").unwrap()));
+    }
 }
