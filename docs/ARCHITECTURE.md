@@ -278,10 +278,10 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
 {
   "version": 1,
   "window": {
-    "fullscreen": true,
+    "fullscreen": false,
     "decorations": false,
     "background_color": "#0d0d0d",
-    "reserved_header_height_px": 0
+    "reserved_header_height_px": 0.0
   },
   "layout": {
     "strategy": "auto",
@@ -301,7 +301,7 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
     "auto_start": true,
     "pause_on_interaction": true,
     "refresh_before_maximize": true,
-    "loop": true
+    "loop_tour": true
   },
   "network_dns": {
     "adblock_dns_enabled": true,
@@ -391,3 +391,17 @@ To achieve app-scoped DNS adblocking without altering the user's system-wide net
 * **Default Behavior**: AdGuard proxy-backed adblocking is active by default.
 * **User Opt-In to System DNS**: The application configuration provides an explicit opt-in setting (`adblock_dns_enabled: false` / `dns_provider: "system"`). When selected, `proxy_url` is omitted, and webviews resolve hostnames directly via the host OS's standard system DNS without proxy overhead.
 * **Phase 0 Feasibility & Platform Fallback**: Support for `proxy_url` on macOS WKWebView requires macOS 14+ and specific runtime flags. If proxy-based routing proves unstable during the Phase 0 feasibility spike, the application cannot force WKWebView alone to use a custom DNS IP. In that scenario, the app falls back to standard system DNS, and provides documentation guiding users to configure AdGuard DNS (`94.140.14.14`) at the OS or router level if adblocking is desired.
+
+---
+
+## 9. Cross-Platform Architectural Matrix (macOS vs. Windows vs. Linux)
+
+| Architectural Dimension | macOS (Darwin) | Windows 10/11 | Linux (Desktop) |
+| :--- | :--- | :--- | :--- |
+| **Guest Webview Engine** | Native WKWebView (`WebKit.framework`) | Microsoft Edge WebView2 (`WebView2Loader.dll` / Chromium) | WebKitGTK 4.1 (`libwebkit2gtk-4.1.so`) |
+| **Per-Webview Proxy Routing** | Native support (macOS 14+ with `macos-proxy` feature) | Native support in WebView2 | Native support in WebKitGTK |
+| **Click-Through Windowing** | `set_ignore_cursor_events: true` via AppKit | `set_ignore_cursor_events: true` via Win32 | `set_ignore_cursor_events: true` via Gtk/X11 |
+| **HUD Overlay Transparency** | Supported with `macOSPrivateApi: true` and `macos-private-api` Cargo feature | Supported natively by WebView2 | Requires active EWMH compositor (Mutter, KWin, Picom); black on non-composited WMs |
+| **Global Shortcuts Subsystem** | Carbon event monitor via `global-hotkey` | Win32 `RegisterHotKey` via `global-hotkey` | X11 supported via `x11rb`; Wayland requires on-screen HUD buttons or XDG portal |
+| **Desktop Coordinates** | Top-left desktop physical pixels (`cursor_position` matching `outer_position`) | Per-Monitor V2 physical pixels matching `outer_position` | X11/XWayland root window physical pixels |
+| **Console Window Behavior** | Native GUI bundle without console | Suppressed via `#![cfg_attr(..., windows_subsystem = "windows")]` | Native ELF GUI process |

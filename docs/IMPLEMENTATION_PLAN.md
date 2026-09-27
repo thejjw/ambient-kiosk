@@ -121,11 +121,87 @@ This document outlines the step-by-step implementation roadmap for building **Am
 
 ### Phase 6: Hardening, Performance & Documentation
 * Memory and process profiling:
-  * Monitor CPU and memory with the 5 preset feeds running.
-  * Confirm audio is muted by default across all guest webviews.
-  * Verify bounded pool prevents runaway process allocation.
-* Cross-platform smoke testing:
-  * macOS (WKWebView): test full-screen transitions and multi-monitor setups.
-  * Windows (WebView2): verify layout sizing without border jitter.
+  * CPU and memory profiling across hardware: `[Pending manual profiling across targets]`
+  * Audio muting verification: `[Pending manual runtime audio check]`
+  * Verified bounded pool ceiling (`max_resident_webviews <= 16`) prevents runaway process allocation via automated unit test.
+* Cross-platform verification:
+  * macOS: Automated suites passing (29 unit tests, 5 UI tests); manual runtime checklist documented in `docs/MANUAL_TESTING.md`.
+  * Windows & Linux: `[Pending user environment compilation and testing]`
 * Documentation:
-  * Architecture, developer guide, keyboard shortcuts, configuration manual.
+  * Completed architecture specification, implementation plan, manual testing checklist, and cross-platform guide.
+---
+
+## Cross-Platform Implementation Guide (Windows & Linux)
+
+This guide specifies how to tackle Windows and Linux compilation, testing, and deployment, highlighting what core components work out-of-the-box, where platform divergences exist, and what specific work is required for implementors on each target operating system.
+
+### 1. Core Cross-Platform Capabilities (Work Out-of-the-Box)
+
+The following core modules are implemented using standard, portable Rust and cross-platform Tauri v2 APIs that require no architectural changes for Windows or Linux:
+
+* **Configuration & Precedence Engine (`src-tauri/src/config.rs`)**:
+  * Resolves configuration hierarchy (`CLI > Portable > AppData > Defaults`) uniformly.
+  * Portable config discovery (`find_portable_config_path`) automatically checks `kiosk-config.json` adjacent to `ambient-kiosk.exe` on Windows and the `ambient-kiosk` binary on Linux.
+  * User AppData directory (`app_config_dir()`) resolves automatically to `%APPDATA%\com.ambientkiosk.kiosk` on Windows and `~/.config/com.ambientkiosk.kiosk` on Linux (XDG specification).
+  * Startup safety validation (`max_resident_webviews <= 16`, title/URL validation, hex color parsing) is 100% portable.
+* **Aspect-Ratio Geometry Calculator (`src-tauri/src/layout.rs`)**:
+  * Pure mathematical candidate scoring algorithm calculating full-bleed slot bounds. Identical across all window managers and display types.
+* **Alternating Tour State Machine (`src-tauri/src/tour.rs`)**:
+  * State transitions, timing countdowns, generation token tracking, stalled-load safety skipping, and paused visual state calculations operate purely in memory and on Tokio asynchronous timers.
+* **Embedded Loopback Proxy (`src-tauri/src/proxy.rs`)**:
+  * Multiplexed HTTP CONNECT, SOCKS5 CONNECT, and plain HTTP forwarding built with standard `tokio::net` async sockets (`TcpListener`, `TcpStream`, `UdpSocket`).
+  * Resolves upstream using AdGuard DoH (RFC 8484 wire format) with fallback to AdGuard plain UDP (`94.140.14.14:53`).
+  * `WebviewBuilder.proxy_url("http://127.0.0.1:<port>")` is supported natively by WebView2 on Windows and WebKitGTK 4.1 on Linux.
+* **Frontend Controller UI (`src/`)**:
+  * Vite + TypeScript frontend, HUD controls, and safe DOM endpoint management render identically inside the coordinator webview across all platforms.
+
+---
+
+### 2. Platform Divergences & Implementor Guidance
+
+Implementors deploying or testing on Windows and Linux must understand the following platform-specific behaviors:
+
+#### A. Linux (Ubuntu / Debian / Fedora / Arch)
+
+1. **Global Shortcuts on Wayland vs. X11**:
+   * *Architecture*: The global shortcut subsystem (`global-hotkey 0.8` used by `tauri-plugin-global-shortcut`) implements native key grabbing for **X11 only** via `x11rb`.
+   * *Wayland Limitation*: Under pure Wayland sessions (without XWayland active), global hotkey registration will fail or return an error because `global-hotkey 0.8` does not implement an XDG Desktop Portal (`org.freedesktop.portal.GlobalShortcuts`) backend.
+   * *Implementor Action*:
+     * In X11 sessions (GNOME on Xorg, XFCE, i3): Hotkeys (`Space`, arrows, `F11`, `Escape`, `KeyH`) function out-of-the-box.
+     * In pure Wayland sessions: The application handles shortcut registration failure gracefully without crashing. Users on pure Wayland must rely directly on the on-screen HUD buttons (`◀`, `⏸`, `▶`, `⛶`, `⚙`).
+     * Future Extension: Implement native DBus portal communication with `org.freedesktop.portal.GlobalShortcuts` to support Wayland global key grabs.
+
+2. **Window Transparency vs. Hit-Testing (Click-Through)**:
+   * *Architecture*: Window visual transparency (`transparent: true` in `tauri.conf.json`) and OS hit-testing/click-through (`set_ignore_cursor_events: true`) are separate mechanisms:
+     * `transparent: true` governs visual alpha blending with the desktop.
+     * `set_ignore_cursor_events: true` instructs the OS compositor to ignore pointer clicks and pass them through to underlying guest webviews.
+   * *Linux Requirement*: Visual transparency on Linux requires an active EWMH compositing window manager (e.g., Mutter on GNOME, KWin on KDE, Picom/Compton on tiling WMs).
+   * *Implementor Action*:
+     * If deployed on a bare X11 window manager without a compositor (e.g. bare i3 or Openbox), transparent window regions will render as solid black rectangles. Ensure a compositor like Picom is running, or set `transparent: false` with background `#0d0d0d` in `tauri.conf.json`.
+
+3. **System Dependencies & Packaging**:
+   * *Required Development Libraries*:
+     * Debian/Ubuntu: `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
+     * Fedora: `webkit2gtk4.1-devel openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel`
+     * Arch Linux: `webkit2gtk-4.1 base-devel curl wget file openssl libappindicator-gtk3 librsvg`
+   * *Packaging Formats*: Use `bun run tauri build` to generate native `.deb`, `.AppImage`, or `.rpm` packages.
+
+---
+
+#### B. Windows 10 / 11
+
+1. **Child Webview Hosting & WebView2 Runtime**:
+   * *Architecture*: Tauri v2 uses Microsoft Edge WebView2 (Chromium engine) via Win32 child `HWND`s.
+   * *System Requirement*: WebView2 runtime is pre-installed on Windows 10 and 11. For Windows Server or stripped environments, install the Evergreen WebView2 Bootstrapper.
+   * *Per-Webview Proxying*: `WebviewBuilder::proxy_url("http://127.0.0.1:<port>")` is supported natively by WebView2 without requiring special compilation flags.
+
+2. **Window Background & Transparency**:
+   * *Behavior*: Win32 ignores alpha channels on standard window surfaces, but WebView2 supports transparent background composition natively.
+   * *Implementor Action*: The HUD overlay window (`hud-overlay`) floats above the main window with `alwaysOnTop: true`. On Windows, ensure `SetWindowPos` or Tauri window sizing synchronizes smoothly during multi-DPI monitor changes.
+
+3. **High-DPI Coordinate Systems (Per-Monitor V2)**:
+   * *Architecture*: Windows uses Per-Monitor V2 DPI scaling. `main_win.cursor_position()` and `outer_position()` return desktop physical coordinates.
+   * *Implementor Action*: Verify that moving the window across monitors with mixed scaling (e.g., a 4K display at 150% and a 1080p display at 100%) correctly recalculates logical window bounds via `main_win.scale_factor()`.
+
+4. **Console Window Subsystem**:
+   * *Setup*: `src-tauri/src/main.rs` includes `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`, ensuring no background command prompt window is spawned in release builds.
