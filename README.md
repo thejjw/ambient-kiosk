@@ -1,6 +1,13 @@
 # Ambient Kiosk
 
-Ambient Kiosk is an ambient workspace and idle-screen dashboard application built with **Tauri v2**. It organizes arbitrary web endpoints into an auto-tiling grid (e.g. $3 \times 2$) and runs an automated tour—elevating each site to full screen with a smooth transition, holding for a configured duration (e.g., 30 seconds), minimizing it back to its grid slot, and cycling through the list.
+Ambient Kiosk is an ambient workspace and idle-screen dashboard application built with **Tauri v2**. It organizes arbitrary web endpoints into an auto-tiling grid (e.g. an asymmetric $3 \times 2$ grid for 5 news presets) and runs an automated tour—elevating each site to full screen with a smooth transition, holding for a configured duration (e.g., 30 seconds), minimizing it back to its grid slot, and cycling through the list.
+
+### Default Presets (News & Markets)
+1. **Biztoc** (`https://biztoc.com/`)
+2. **Alltoc** (`https://alltoc.com/`)
+3. **Biztoc Wire** (`https://biztoc.com/wire`)
+4. **AP News Latest** (`https://apnews.com/hub/latest-news`)
+5. **Finviz News** (`https://finviz.com/news`)
 
 ---
 
@@ -20,7 +27,9 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
    * **Zero IPC Capabilities**: Remote URLs are never mapped to Tauri command capabilities; untrusted guest scripts cannot call native Rust APIs or access the host filesystem.
    * **Navigation Restrictions (`on_navigation`)**: Prevents untrusted guest pages from navigating to unauthorized origins or protocols (`file://`, `tauri://`).
    * **Popup Suppression (`on_new_window`)**: Intercepts `window.open` and `<a target="_blank">` to prevent rogue window breakouts.
-
+4. **Just-In-Time Pre-Refresh**: While the active tile minimizes, the upcoming tile triggers a background refresh (`window.location.reload()`), ensuring fresh headlines upon expansion without mid-tour loading spinners.
+5. **Bounded Lifecycle Pool**: Caps active child webviews to visible slots ($M = 5$) plus a bounded prefetch buffer ($K = 1$), avoiding runaway thread and memory allocation.
+6. **AdGuard DNS Adblocking**: Integrated DNS-over-HTTPS proxy (`https://dns.adguard-dns.com/dns-query`) filters banner ads and trackers across news sites natively.
 ---
 
 ## Documentation

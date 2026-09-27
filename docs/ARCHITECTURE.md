@@ -2,27 +2,35 @@
 
 ## 1. System Overview
 
-Ambient Kiosk is a dedicated multi-surface web dashboard designed for idle displays, wall monitors, and ambient workspaces. It organizes $N$ configured web endpoints into an auto-tiled layout (e.g., $3 \times 2$ for 6 endpoints), automatically runs a sequential tour that elevates each tile to full-screen view with a smooth transition, holds the view for a configured duration (e.g., 30 seconds), minimizes it back to its grid slot, and advances to the next tile.
+Ambient Kiosk is a dedicated multi-surface web dashboard designed for idle displays, wall monitors, and ambient workspaces. It organizes $N$ configured web endpoints into an auto-tiled layout (e.g., a $3 \times 2$ asymmetric grid for 5 presets: 3 top, 2 bottom), automatically runs a sequential tour that elevates each tile to full-screen view with a smooth transition, holds the view for a configured duration (e.g., 30 seconds), minimizes it back to its grid slot, and advances to the next tile.
+
+### Default Presets (News & Market Feeds)
+1. **Biztoc**: `https://biztoc.com/` (Business & financial headline stream)
+2. **Alltoc**: `https://alltoc.com/` (Comprehensive news aggregator)
+3. **Biztoc Wire**: `https://biztoc.com/wire` (Real-time financial wire)
+4. **AP News Latest**: `https://apnews.com/hub/latest-news` (Breaking global news)
+5. **Finviz News**: `https://finviz.com/news` (Market news & visual analytics)
 
 ```
-+-------------------------------------------------------------+
-|                        Window Frame                         |
-|  +--------------------+ +--------------------+ +---------+  |
-|  | Slot 0 (Webview 0) | | Slot 1 (Webview 1) | | Slot 2  |  |
-|  +--------------------+ +--------------------+ +---------+  |
-|  +--------------------+ +--------------------+ +---------+  |
-|  | Slot 3 (Webview 3) | | Slot 4 (Webview 4) | | Slot 5  |  |
-|  +--------------------+ +--------------------+ +---------+  |
-|                                                             |
-|           === Tour Trigger: Focus Slot 1 ===                |
-|                                                             |
-|  +-------------------------------------------------------+  |
-|  |                                                       |  |
-|  |              Slot 1 (Elevated / Maximized)            |  |
-|  |                   Hold for 30s                        |  |
-|  |                                                       |  |
-|  +-------------------------------------------------------+  |
-+-------------------------------------------------------------+
++-------------------------------------------------------------------+
+|                           Window Frame                            |
+|  +---------------------+ +---------------------+ +-------------+  |
+|  | Slot 0: Biztoc      | | Slot 1: Alltoc      | | Slot 2:     |  |
+|  |                     | |                     | | Biztoc Wire |  |
+|  +---------------------+ +---------------------+ +-------------+  |
+|  +--------------------------------+ +---------------------------+  |
+|  | Slot 3: AP News Latest         | | Slot 4: Finviz News       |  |
+|  +--------------------------------+ +---------------------------+  |
+|                                                                   |
+|            === Tour Trigger: Focus Slot 1 (Alltoc) ===            |
+|                                                                   |
+|  +-------------------------------------------------------------+  |
+|  |                                                             |  |
+|  |                    Slot 1 (Maximized View)                  |  |
+|  |                   Hold for 30s (Audio Muted)                |  |
+|  |                                                             |  |
+|  +-------------------------------------------------------------+  |
++-------------------------------------------------------------------+
 ```
 
 ---
@@ -106,34 +114,42 @@ graph TD
 
 ## 4. Layout & Motion Mechanics
 
-### 4.1 Auto-Tiling Grid Geometry
-Given $N$ endpoints and parent window dimensions $(W, H)$:
-1. **Column Calculation**:
-   $$C = \lceil\sqrt{N}\rceil$$
-2. **Row Calculation**:
-   $$R = \lceil N / C\rceil$$
-3. **Slot Sizing**:
-   $$w_{\text{slot}} = \frac{W - (C - 1) \cdot g - 2p}{C}, \quad h_{\text{slot}} = \frac{H - (R - 1) \cdot g - 2p}{R}$$
-   where $g$ is grid gap and $p$ is window edge padding.
-4. **Resting Coordinates for Slot $i$**:
-   $$\text{col} = i \pmod C, \quad \text{row} = \lfloor i / C \rfloor$$
-   $$x_i = p + \text{col} \cdot (w_{\text{slot}} + g), \quad y_i = p + \text{row} \cdot (h_{\text{slot}} + g)$$
+### 4.1 Auto-Tiling & Asymmetric Grid Geometry
+For $N = 5$ (default preset) across window dimensions $(W, H)$ with padding $p$ and gap $g$:
+* Row count $R = 2$, split as 3 tiles in row 0 and 2 tiles in row 1.
+* Row height:
+  $$h_{\text{slot}} = \frac{H - g - 2p}{2}$$
+* Row 0 (3 columns, slots 0, 1, 2):
+  $$w_{\text{row0}} = \frac{W - 2g - 2p}{3}, \quad x_i = p + i \cdot (w_{\text{row0}} + g), \quad y_i = p$$
+* Row 1 (2 columns, slots 3, 4):
+  $$w_{\text{row1}} = \frac{W - g - 2p}{2}, \quad x_i = p + (i - 3) \cdot (w_{\text{row1}} + g), \quad y_i = p + h_{\text{slot}} + g$$
 
-### 4.2 The Native Animation Bottleneck & Solution
-* **Problem**: Continuously resizing native child views (`NSView` on macOS or `CoreWebView2` on Windows) at 60 FPS triggers synchronous OS view invalidations and forces inner layout reflows in the guest web page on every frame, causing visual stutter and high CPU load.
-* **Solution: Coordinate Interpolation & Elevation**:
-  1. **Resting Phase**: All $N$ child webviews sit at their calculated $(x_i, y_i, w_i, h_i)$ resting bounds.
-  2. **Transition Phase**:
-     * The active webview is brought to the top of the z-order (elevation).
-     * Instead of a continuous 60fps native window resize loop across all tiles, an animation timer runs an eased interpolation ($T \approx 400\text{--}600\,\text{ms}$) calculating intermediate logical bounds:
-       $$x(t) = \text{lerp}(x_{\text{rest}}, x_{\text{max}}, e(t))$$
-       $$y(t) = \text{lerp}(y_{\text{rest}}, y_{\text{max}}, e(t))$$
-       $$w(t) = \text{lerp}(w_{\text{rest}}, w_{\text{max}}, e(t))$$
-       $$h(t) = \text{lerp}(h_{\text{rest}}, h_{\text{max}}, e(t))$$
-       using cubic ease-in-out: $e(t) = 3t^2 - 2t^3$.
-     * Bounds are updated at a clamped animation cadence (~30-60 updates/sec depending on OS compositor efficiency) directly on the focused webview.
-  3. **Maximized Phase**: Focused webview covers $(0, 0, W, H)$. Inactive webviews are hidden or remain static behind the focused view.
-  4. **Restoration Phase**: The process is reversed to return the webview to its resting slot before moving to $i+1$.
+For arbitrary $N$, row-by-row greedy distribution calculates:
+$$C = \lceil\sqrt{N}\rceil, \quad R = \lceil N / C\rceil$$
+where remainder slots in the final row can either stretch across available width or retain the standard column width.
+
+### 4.2 Native Child Webview Realities & Portable Fallbacks
+* **Z-Ordering Limitations**: Tauri v2's cross-platform `Webview` API provides `set_position`, `set_size`, `set_focus`, `hide`, `show`, and `close`, but lacks a portable `set_z_order` or `bring_to_front` method across OS backends.
+* **Maximization Fallback (Sibling Hide Strategy)**:
+  1. When webview $i$ initiates expansion, its bounds are interpolated toward $(0, 0, W, H)$.
+  2. To avoid visual collision and occluded redraw stutter, inactive sibling webviews $(j \ne i)$ are hidden via `webview.hide()` during the transition or upon full maximization.
+  3. When webview $i$ finishes minimizing back to $(x_i, y_i, w_i, h_i)$, sibling webviews are restored via `webview.show()`.
+* **HUD & Controller Occlusion**:
+  * Because native OS child webviews (`NSView`/`CoreWebView2`) render above the coordinator window's HTML DOM canvas, an in-DOM HUD will be obscured if child views overlap it.
+  * **Architecture Solutions**:
+    1. **Reserved Top Bar**: Window coordinator reserves a $40\,\text{px}$ header zone ($y \in [0, 40]$); child webviews are strictly bounded within $y \in [40, H]$.
+    2. **Frameless Overlay Window**: A dedicated secondary transparent window with `always_on_top(true)` for floating HUD controls.
+    3. **Global Shortcuts**: Tour controls driven via keyboard shortcuts (`Space` for pause, `Arrows` for navigation, `F11` for fullscreen).
+
+### 4.3 Just-In-Time Pre-Refresh (Pipelined Reloading)
+To ensure that headlines and live charts are fresh without exposing the user to mid-tour loading spinners:
+1. **Trigger Moment**: When active tile $i$ finishes its hold duration and begins its `Minimizing` transition, the controller immediately fires a background reload command to tile $i+1$:
+   ```rust
+   // Rust controller triggers background refresh on upcoming target
+   next_webview.eval("window.location.reload()").ok();
+   ```
+2. **Pipelined Window**: Tile $i+1$ performs network fetch, HTML parsing, and DOM layout reflow while tile $i$ minimizes ($500\,\text{ms}$) and while the grid pauses during `GridRest` ($1500\text{--}2000\,\text{ms}$).
+3. **Result**: When tile $i+1$ starts expanding, its content is fully rendered and up to date, eliminating visible layout reflows during the zoom animation.
 
 ---
 
@@ -146,28 +162,29 @@ Given $N$ endpoints and parent window dimensions $(W, H)$:
                              | start_tour()
                              v
               +-----------------------------+
-              |          GridRest           | <--------------------+
-              +-----------------------------+                      |
-                             |                                     |
-              advance_timer  | select index i                      |
-                             v                                     |
-              +-----------------------------+                      |
-              |      Maximizing(index)      |                      |
-              +-----------------------------+                      |
-                             | anim_complete                       |
-                             v                                     |
-     user     +-----------------------------+                      |
-   interact   |      Maximized(index)       |                      |
-  +---------> |      (Hold for 30s)         |                      |
-  |           +-----------------------------+                      |
-  | resume_tour              | hold_complete                       |
-  |                          v                                     |
-  +---------- +-----------------------------+                      |
-   (paused)   |      Minimizing(index)      |                      |
-              +-----------------------------+                      |
-                             | anim_complete                       |
-                             +-------------------------------------+
-                                       index = (i + 1) % N
+              |          GridRest           | <------------------------+
+              +-----------------------------+                          |
+                             |                                         |
+              advance_timer  | select index i                          |
+                             v                                         |
+              +-----------------------------+                          |
+              |      Maximizing(index)      |                          |
+              +-----------------------------+                          |
+                             | anim_complete                           |
+                             v                                         |
+     user     +-----------------------------+                          |
+   interact   |      Maximized(index)       |                          |
+  +---------> |      (Hold for 30s)         |                          |
+  |           +-----------------------------+                          |
+  | resume_tour              | hold_complete                           |
+  |                          v                                         |
+  +---------- +-----------------------------+                          |
+   (paused)   |      Minimizing(index)      |                          |
+              |  * JIT RELOAD (index + 1) * |                          |
+              +-----------------------------+                          |
+                             | anim_complete                           |
+                             +-----------------------------------------+
+                                           index = (i + 1) % N
 ```
 
 ### 5.1 State Definitions
@@ -191,28 +208,54 @@ Configuration is persisted locally (e.g., in `$APP_CONFIG_DIR/config.json`) and 
     "hold_duration_ms": 30000,
     "transition_duration_ms": 500,
     "grid_rest_duration_ms": 2000,
+    "refresh_before_maximize": true,
     "auto_start_tour": true,
-    "pause_on_hover": false,
     "pause_on_interaction": true,
     "user_idle_resume_ms": 15000,
     "mute_audio": true,
-    "refresh_interval_minutes": 15
+    "active_pool_size": 5,
+    "prefetch_buffer_size": 1,
+    "adblock_dns_enabled": true,
+    "dns_provider": "adguard_doh",
+    "doh_url": "https://dns.adguard-dns.com/dns-query",
+    "dot_url": "tls://dns.adguard-dns.com",
+    "plain_dns_ip": "94.140.14.14:53"
   },
   "endpoints": [
-    { "id": "1", "title": "Hacker News", "url": "https://news.ycombinator.com" },
-    { "id": "2", "title": "GitHub Trending", "url": "https://github.com/trending" },
-    { "id": "3", "title": "Weather Radar", "url": "https://radar.weather.gov" },
-    { "id": "4", "title": "Financial Markets", "url": "https://tradingview.com" },
-    { "id": "5", "title": "Server Status", "url": "https://status.cloud.google.com" },
-    { "id": "6", "title": "BBC News", "url": "https://www.bbc.com/news" }
+    { "id": "1", "title": "Biztoc", "url": "https://biztoc.com/" },
+    { "id": "2", "title": "Alltoc", "url": "https://alltoc.com/" },
+    { "id": "3", "title": "Biztoc Wire", "url": "https://biztoc.com/wire" },
+    { "id": "4", "title": "AP News Latest", "url": "https://apnews.com/hub/latest-news" },
+    { "id": "5", "title": "Finviz News", "url": "https://finviz.com/news" }
   ]
 }
 ```
 
 ---
 
-## 7. Performance & Resource Management
+## 7. Bounded Webview Pool & Lifecycle Management
 
-1. **Audio Isolation**: Automatically mute all guest webviews by default; allow unmute only via explicit user action on the focused tile.
-2. **Process Throttling**: OS webview runtimes automatically throttle timers on occluded or background surfaces. In maximizing state, background webviews are occluded by the active top-level view, minimizing CPU usage.
-3. **Periodic Reloading**: Configurable per-feed refresh intervals (e.g. reload every 15 minutes) prevent long-running single-page apps from accumulating memory leaks on continuous 24/7 idle screens.
+To prevent unbounded thread creation, memory bloat, and GPU process crashes when users configure dozens of sites:
+1. **Active Pool Cap**: The runtime maintains at most $M$ active webview instances matching the visible grid layout (e.g., $M = 5$ for the 3/2 preset) plus an optional $K = 1$ prefetch buffer for upcoming offscreen sites.
+2. **Virtualization**: Additional endpoints beyond $M + K$ remain virtualized as URL records in memory.
+3. **Thread Architecture**:
+   * OS event loop and native webview message processing execute on the OS main thread (as required by AppKit and Win32).
+   * Tour timing, coordinate calculations, and DNS proxy forwarding run on asynchronous Tokio background worker threads, preventing UI lockups.
+
+---
+
+## 8. Adblocking DNS Engine
+
+News aggregators and financial portals (e.g. AP News, Biztoc, Finviz) serve aggressive banner networks, video ads, and analytics beacons that degrade kiosk legibility and waste bandwidth.
+
+### 8.1 Integration Mechanism
+Operating system webviews (WebKit on macOS, WebView2 on Windows) rely on OS-level DNS resolution and do not support traditional browser adblock extensions.
+
+Ambient Kiosk applies network-level adblocking using **AdGuard DNS**:
+1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (HTTP / SOCKS5) on `127.0.0.1:<ephemeral_port>`.
+2. **DNS Routing**:
+   * **Primary: DNS-over-HTTPS (DoH)**: Queries resolved via `https://dns.adguard-dns.com/dns-query`.
+   * **Secondary: DNS-over-TLS (DoT)**: Queries resolved via `tls://dns.adguard-dns.com`.
+   * **Fallback: Plain DNS**: Direct UDP/TCP queries to AdGuard resolver `94.140.14.14:53`.
+3. **Tauri Webview Attachment**: Each child `WebviewBuilder` is initialized with `.proxy_url("http://127.0.0.1:<port>")` pointing to the local proxy.
+4. **User Opt-In / System DNS**: A configuration toggle `adblock_dns_enabled` permits switching back to standard system DNS resolution without proxy overhead.

@@ -17,6 +17,21 @@ This document outlines the step-by-step implementation roadmap for building **Am
 ---
 
 ## Phase Breakdown
+### Phase 0: macOS Feasibility Spike (Native Webview Realities)
+* **Objective**: Validate native child `Webview` behaviors, z-ordering limits, and adblocking proxy before full application wiring.
+* **Spike Steps**:
+  1. **Dual-Webview Bounds & Maximization**:
+     * Spawn 2 child `Webview`s inside a test window.
+     * Animate webview 0 to full window dimensions.
+     * Validate sibling hide fallback (`webview1.hide()`) to prevent visual collision, since Tauri v2 lacks a cross-platform `set_z_order` API.
+     * Verify smooth restoration (`webview1.show()`) upon return to resting bounds.
+  2. **Controller HUD & Occlusion**:
+     * Prove HUD visibility using a reserved $40\,\text{px}$ top bar ($y \in [0, 40]$) versus a secondary frameless overlay window with `always_on_top(true)`.
+  3. **Pipelined JIT Reload**:
+     * Execute background `next_webview.eval("window.location.reload()")` during minimizing animation; verify page finishes painting prior to the next expansion.
+  4. **Adblocking DNS Smoke Test**:
+     * Test local proxy routing webview traffic through AdGuard DoH (`https://dns.adguard-dns.com/dns-query`) or plain DNS (`94.140.14.14:53`) via `WebviewBuilder.proxy_url()`.
+* **Verification**: Functional prototype demonstrating bounds animation, sibling hide/show, JIT reload, and ad-filtered remote page loads.
 
 ### Phase 1: Tauri v2 Project Scaffolding
 * Initialize Vite + TypeScript project with Bun in `ambient-kiosk`.
@@ -30,61 +45,67 @@ This document outlines the step-by-step implementation roadmap for building **Am
 * Define Rust data structures with `serde`:
   * `KioskConfig`, `KioskSettings`, `EndpointItem`.
 * Implement local JSON configuration loading and saving in `$APPDATA/ambient-kiosk/config.json`.
-* Seed default endpoints for first-time launch:
-  * Hacker News (`https://news.ycombinator.com`)
-  * GitHub Trending (`https://github.com/trending`)
-  * BBC News (`https://www.bbc.com/news`)
-  * Weather Radar (`https://radar.weather.gov`)
+* Seed default endpoints with the 5 presets:
+  1. Biztoc (`https://biztoc.com/`)
+  2. Alltoc (`https://alltoc.com/`)
+  3. Biztoc Wire (`https://biztoc.com/wire`)
+  4. AP News Latest (`https://apnews.com/hub/latest-news`)
+  5. Finviz News (`https://finviz.com/news`)
+* Include DNS adblocking settings (`adblock_dns_enabled`, `dns_provider`, `doh_url`, `dot_url`, `plain_dns_ip`).
 * Expose Tauri commands:
   * `get_config() -> KioskConfig`
   * `save_config(config: KioskConfig) -> Result<(), String>`
 * **Verification**: Unit tests for config serialization/deserialization and fallback to defaults.
 
-### Phase 3: Native Multi-Webview Orchestration
-* Implement grid geometry calculator in Rust:
-  * Given $N$ endpoints and main window inner size $(W, H)$, calculate bounding boxes $(x, y, w, h)$ for slots $0 \dots N-1$.
-* Implement webview lifecycle manager:
-  * `spawn_guest_webviews(app_handle, endpoints)`:
-    * Construct child `WebviewBuilder` per endpoint.
-    * Assign unique webview labels (`guest-0`, `guest-1`, etc.).
-    * Set initial resting bounds.
+### Phase 3: Native Multi-Webview Orchestration & Adblocking Proxy
+* Implement embedded DNS-resolving local proxy in Rust:
+  * Routes DNS queries to AdGuard DoH/DoT/UDP.
+  * Exposes local HTTP/SOCKS5 proxy on `127.0.0.1:<port>` when `adblock_dns_enabled` is active.
+* Implement asymmetric grid geometry calculator:
+  * 3/2 box layout for $N = 5$ (Row 0: 3 columns, Row 1: 2 columns).
+  * Respects reserved $40\,\text{px}$ header zone for controller HUD.
+* Implement bounded webview pool manager:
+  * Caps live webviews to $M = 5$ visible slots + $K = 1$ prefetch buffer.
+  * Background scheduling on asynchronous Tokio worker tasks.
 * Implement Security Policies:
   * `on_navigation`: Restrict URLs strictly to `http`/`https` protocols.
   * `on_new_window`: Intercept popup requests; cancel popups or delegate to system browser.
   * Zero-capabilities ACL: Confirm guest webview labels are excluded from all IPC command capabilities.
-* **Verification**: Launch app with 4 test endpoints; verify all 4 render simultaneously without iframe blocking errors.
+* **Verification**: Launch app with the 5 preset endpoints; verify all 5 render simultaneously without iframe blocking errors, with ads filtered.
 
-### Phase 4: Animation & Tour Engine
+### Phase 4: Animation & Tour Engine with JIT Pre-Refresh
 * Implement Tour State Machine in Rust:
   * States: `Stopped`, `GridRest`, `Maximizing(index)`, `Maximized(index)`, `Minimizing(index)`, `Paused`.
 * Implement Coordinate Interpolator:
   * Cubic ease-in-out curve: $e(t) = 3t^2 - 2t^3$.
-  * Timer loop running intermediate bounds updates on the active webview from $(x_{\text{rest}}, y_{\text{rest}}, w_{\text{rest}}, h_{\text{rest}})$ to $(0, 0, W, H)$ over configured transition duration (e.g. 500ms).
+  * Timer loop updating bounds of focused webview from resting slot to $(0, 0, W, H)$.
+  * Sibling-hide fallback: hide sibling webviews during maximization, restore on minimizing completion.
+* Implement JIT Pre-Refresh Trigger:
+  * Upon entering `Minimizing(i)`, fire `eval("window.location.reload()")` on webview $(i + 1) \pmod N$.
 * Implement Tour Timer:
-  * After `Maximizing` finishes, transition to `Maximized`.
-  * Start hold timer (e.g. 30 seconds).
-  * On expiration, transition to `Minimizing`.
+  * Hold timer (e.g. 30 seconds).
   * Advance active index: $i_{\text{next}} = (i + 1) \pmod N$.
 * Expose control commands:
   * `start_tour()`, `pause_tour()`, `resume_tour()`, `next_tile()`, `prev_tile()`.
-* **Verification**: Observe smooth expansion from grid slot to full screen, hold for configured seconds, and contraction back to slot.
+* **Verification**: Observe smooth expansion from grid slot to full screen, hold for configured seconds, background refresh of upcoming tile, and contraction back to slot.
 
 ### Phase 5: Controller UI & User Interaction
 * Build an unobtrusive floating HUD / control overlay:
-  * Hover-activated top bar or hotkey (`Space` for pause/resume, `ArrowRight` for next, `ArrowLeft` for previous, `F11` for fullscreen).
-  * Indicator badges showing current active tile number and countdown timer.
-  * Settings drawer to add, reorder, delete URLs and adjust hold/transition durations.
-* Interaction detection:
-  * If user hovers or interacts with the maximized view, temporarily pause the countdown timer to allow reading/scrolling.
-  * Resume countdown after idle timeout (e.g. 15s).
+  * Reserved non-overlapping top bar ($y \in [0, 40]$) or frameless always-on-top overlay.
+  * Indicator badges showing active tile title, countdown timer, and adblock status.
+  * Hotkeys: `Space` (pause/resume), `ArrowRight` (next), `ArrowLeft` (previous), `F11` (fullscreen).
+  * Settings drawer to add, reorder, delete URLs, adjust durations, and toggle DNS adblocking.
+* Interaction detection & pause:
+  * User interaction pauses the tour timer; resumes after idle timeout (e.g. 15s).
 * **Verification**: Verify manual navigation, pause/resume hotkeys, and URL configuration drawer.
 
 ### Phase 6: Hardening, Performance & Documentation
 * Memory and process profiling:
-  * Monitor CPU and memory with 6+ live webviews.
-  * Verify audio is muted on guest webviews by default.
+  * Monitor CPU and memory with the 5 preset feeds running.
+  * Confirm audio is muted by default across all guest webviews.
+  * Verify bounded pool prevents runaway process allocation.
 * Cross-platform smoke testing:
   * macOS (WKWebView): test full-screen transitions and multi-monitor setups.
   * Windows (WebView2): verify layout sizing without border jitter.
-* Write developer and user documentation:
-  * Quickstart guide, keyboard shortcuts, configuration manual.
+* Documentation:
+  * Architecture, developer guide, keyboard shortcuts, configuration manual.
