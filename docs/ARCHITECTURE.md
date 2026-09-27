@@ -140,17 +140,17 @@ where remainder slots in the final row can either stretch across available width
     1. **Reserved Top Bar**: Window coordinator reserves a $40\,\text{px}$ header zone ($y \in [0, 40]$); child webviews are strictly bounded within $y \in [40, H]$.
     2. **Frameless Overlay Window**: A dedicated secondary transparent window with `always_on_top(true)` for floating HUD controls.
     3. **Global Shortcuts**: Tour controls driven via keyboard shortcuts (`Space` for pause, `Arrows` for navigation, `F11` for fullscreen).
-
+* **Interaction Observation Limitations**:
+  * Because guest webviews host cross-origin remote URLs under zero-capability isolation, the host DOM cannot inspect guest click or scroll events. Automatic interaction pause is an unproven Phase 0 hypothesis; global keyboard controls (`Space` to pause/resume) serve as the primary guaranteed control.
 ### 4.3 Just-In-Time Pre-Refresh (Pipelined Reloading)
-To ensure that headlines and live charts are fresh without exposing the user to mid-tour loading spinners:
+To update headlines and charts before expansion:
 1. **Trigger Moment**: When active tile $i$ finishes its hold duration and begins its `Minimizing` transition, the controller fires a native background reload command on tile $i+1$:
    ```rust
    // Rust controller triggers native background reload on upcoming target
    next_webview.reload().ok();
    ```
-2. **Pipelined Window & Hypothesis**: Tile $i+1$ performs network fetch, HTML parsing, and DOM layout reflow while tile $i$ minimizes ($500\,\text{ms}$) and while the tour coordinator enters `PreparingNext` / `GridRest` ($1500\text{--}2000\,\text{ms}$).
-3. **Phase 0 Validation**: This reloading pipeline is an architectural hypothesis subject to empirical validation in the Phase 0 feasibility spike. If network latency exceeds the transition window, an explicit load-finished event or readiness timeout prevents expanding into a blank or partially reflowed page.
----
+2. **Reload Coalescing**: Only one reload request per webview may be in flight at any time. Duplicate triggers while a reload is pending are ignored.
+3. **Phase 0 Validation & Timeout Handling**: A fixed transition window cannot guarantee that heavy news sites (such as AP News or Finviz) will finish loading over slower networks. Therefore, the tour coordinator introduces an explicit `PreparingNext` state driven by `on_page_load(Finished)` with a bounded safety timeout (e.g. 2500ms). If the timeout elapses or load fails, the engine does not maximize a blank or half-rendered view; it skips expansion for that cycle, retains the prior content in its grid slot, and advances to prepare the next candidate.
 
 ## 5. Tour Engine & State Machine
 
@@ -187,8 +187,11 @@ To ensure that headlines and live charts are fresh without exposing the user to 
               |    PreparingNext(index + 1) |                          |
               | (Wait on load_done | timeout)|                         |
               +-----------------------------+                          |
-                             | load_done OR timeout (e.g. 2.5s)        |
-                             +-----------------------------------------+
+                             | load_done                               |
+                             |---------------------------------------->|
+                             | timeout (2.5s) / error                  |
+                             | (skip expansion, retain slot)           |
+                             +---------------------------------------->| (advance to index + 2)
                                            index = (i + 1) % N
 ```
 
@@ -198,9 +201,10 @@ To ensure that headlines and live charts are fresh without exposing the user to 
 * **`Maximizing(i)`**: Animating bounds of webview $i$ from resting to full viewport.
 * **`Maximized(i)`**: Webview $i$ fully expanded. Hold timer active (e.g., 30 seconds).
 * **`Minimizing(i)`**: Animating bounds of webview $i$ from full viewport back to resting slot. Triggers `next_webview.reload()`.
-* **`PreparingNext(target)`**: Transitional state between minimization and the next maximization. Monitors target webview for page-load completion or elapses a configurable safety timeout (e.g. 2500ms) before advancing to `GridRest` and `Maximizing(target)`.
-* **`Paused`**: Tour timer paused due to explicit user interaction (click, scroll, mouse movement inside the maximized view) or user manual pause. Resumes after idle timeout.
-
+* **`PreparingNext(target)`**: Transitional state between minimization and the next maximization. Monitors target webview for page-load completion via `on_page_load(Finished)`.
+  * **On load finish**: Advances to `GridRest` and then `Maximizing(target)`.
+  * **On timeout (2.5s) or load error**: Does not expand a blank/unrendered page. Skips maximization for this cycle, keeps existing slot content, and advances to the next candidate.
+* **`Paused`**: Tour timer paused via keyboard shortcut (`Space`) or manual HUD control. Resumes upon unpause.
 ---
 
 ## 6. Configuration Schema
@@ -241,11 +245,12 @@ Configuration is persisted locally (e.g., in `$APP_CONFIG_DIR/config.json`) and 
 
 ## 7. Bounded Webview Pool & Lifecycle Management
 
-To prevent unbounded OS webview process proliferation, GPU context exhaustion, and memory bloat when users configure dozens of sites:
-1. **Active Pool Cap**: The runtime maintains at most $M$ active webview instances matching the visible grid layout (e.g., $M = 5$ for the 3/2 preset) plus an optional $K = 1$ prefetch buffer for upcoming offscreen sites.
-2. **Virtualization**: Additional endpoints beyond $M + K$ remain virtualized as URL records in memory.
-3. **Concurrency & Event Loop Model**:
-   * Native webview creation, destruction, and coordinate bounds mutations must execute on the OS main thread (mandated by AppKit on macOS and Win32 on Windows). Tauri handles webview window messages on this thread.
+1. **Preset Baseline ($N = 5$)**: For the default 5 presets running in the $3 \times 2$ grid layout ($M = 5$), all 5 webviews are active and resident simultaneously. There are no additional offscreen webviews to pre-load for this baseline preset.
+2. **Virtualization on Overflow**: If a user configures more endpoints than visible grid slots (e.g. 10 or 20 URLs), the active webview pool is capped at $M$ visible slots plus an optional $K = 1$ buffer. Endpoints beyond $M + K$ remain virtualized as URL records in memory and are navigated onto existing webview slots dynamically as the tour progresses.
+3. **In-Flight Reload Bounding**: At most one webview reload may be in flight at any given moment (the upcoming target tile).
+4. **Concurrency & Event Loop Model**:
+   * OS webview runtimes (WebKit / WebView2) manage their own internal helper processes and rendering threads; Tauri does not allocate an OS thread per site.
+   * Native webview creation, destruction, and coordinate bounds mutations must execute on the OS main thread (mandated by AppKit on macOS and Win32 on Windows).
    * Tour timing, state machine transitions, readiness timeouts, and the local DNS-forwarding proxy run asynchronously on Tokio background tasks without blocking UI responsiveness.
 
 ---
@@ -254,14 +259,19 @@ To prevent unbounded OS webview process proliferation, GPU context exhaustion, a
 
 News aggregators and financial portals (e.g. AP News, Biztoc, Finviz) serve aggressive banner networks, video ads, and analytics beacons that degrade kiosk legibility and waste bandwidth.
 
-### 8.1 Integration Mechanism
-Operating system webviews (WebKit on macOS, WebView2 on Windows) rely on OS-level DNS resolution and do not support traditional browser adblock extensions.
+### 8.1 Integration Mechanism & Limitations
+Operating system webviews (WebKit on macOS, WebView2 on Windows) do not expose a per-webview DNS configuration API; they automatically delegate all DNS lookups to the operating system network stack. A DNS URL (such as `https://dns.adguard-dns.com/dns-query` or `tls://dns.adguard-dns.com`) cannot be passed directly to a webview.
 
-Ambient Kiosk evaluates network-level adblocking using **AdGuard DNS**:
-1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (HTTP / SOCKS5) on `127.0.0.1:<ephemeral_port>`.
-2. **DNS Routing**:
-   * **Primary: DNS-over-HTTPS (DoH)**: Queries resolved via `https://dns.adguard-dns.com/dns-query`.
-   * **Secondary: DNS-over-TLS (DoT)**: Queries resolved via `tls://dns.adguard-dns.com`.
-   * **Fallback: Plain DNS**: Direct UDP/TCP queries to AdGuard resolver `94.140.14.14:53`.
+To achieve app-scoped DNS adblocking without altering the user's system-wide network configuration, the proposed architecture routes child webview traffic through a local loopback proxy:
+1. **Local Forwarding Proxy**: The Rust backend spins up a lightweight embedded loopback proxy (HTTP CONNECT / SOCKS5) on `127.0.0.1:<ephemeral_port>`.
+2. **Upstream AdGuard DNS Resolution**:
+   * The local proxy intercepts domain connections and resolves hostnames upstream using AdGuard DNS:
+     * **Primary**: DNS-over-HTTPS (DoH) via `https://dns.adguard-dns.com/dns-query`.
+     * **Secondary**: DNS-over-TLS (DoT) via `tls://dns.adguard-dns.com`.
+     * **Fallback in Proxy**: Plain DNS query to AdGuard resolver `94.140.14.14:53` if encrypted DNS fails or is unreachable.
 3. **Tauri Webview Attachment**: Child `WebviewBuilder` instances are configured with `.proxy_url("http://127.0.0.1:<port>")`.
-4. **Feasibility Validation & Fallback**: Setting `proxy_url` on macOS WKWebView is subject to platform version requirements (macOS 14+) and will be validated in the Phase 0 spike. If proxying proves unstable on target platforms, the fallback is a configuration toggle allowing users to opt into system-level DNS adblocking (`94.140.14.14`).
+
+### 8.2 Defaults, User Opt-In, and Platform Fallback
+* **Default Behavior**: AdGuard proxy-backed adblocking is active by default.
+* **User Opt-In to System DNS**: The application configuration provides an explicit opt-in setting (`adblock_dns_enabled: false` / `dns_provider: "system"`). When selected, `proxy_url` is omitted, and webviews resolve hostnames directly via the host OS's standard system DNS without proxy overhead.
+* **Phase 0 Feasibility & Platform Fallback**: Support for `proxy_url` on macOS WKWebView requires macOS 14+ and specific runtime flags. If proxy-based routing proves unstable during the Phase 0 feasibility spike, the application cannot force WKWebView alone to use a custom DNS IP. In that scenario, the app falls back to standard system DNS, and provides documentation guiding users to configure AdGuard DNS (`94.140.14.14`) at the OS or router level if adblocking is desired.

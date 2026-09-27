@@ -27,13 +27,15 @@ This document outlines the step-by-step implementation roadmap for building **Am
      * Verify smooth restoration (`webview1.show()`) upon return to resting bounds.
   2. **Controller HUD & Occlusion**:
      * Prove HUD visibility using a reserved $40\,\text{px}$ top bar ($y \in [0, 40]$) versus a secondary frameless overlay window with `always_on_top(true)`.
-  3. **Pipelined JIT Reload & Readiness**:
-     * Execute background `next_webview.reload()` during minimizing animation.
-     * Validate page readiness handling via navigation events or an upper-bound timeout (e.g. 2.5s) in a `PreparingNext` state before triggering expansion.
+  3. **Pipelined JIT Reload & PreparingNext Readiness**:
+     * Execute background `next_webview.reload()` during minimizing animation with reload coalescing (max 1 in-flight reload).
+     * Test `PreparingNext` state: verify advance on `on_page_load(Finished)`. On timeout (2.5s) or failure, verify skip-expansion behavior (retain resting slot, advance to next candidate without maximizing incomplete content).
   4. **Adblocking DNS Smoke Test**:
-     * Test local proxy routing webview traffic through AdGuard DoH (`https://dns.adguard-dns.com/dns-query`) or plain DNS (`94.140.14.14:53`) via `WebviewBuilder.proxy_url()`.
-     * Verify macOS WKWebView proxy behavior and evaluate platform stability.
-* **Verification**: Functional prototype demonstrating bounds animation, sibling hide/show, JIT native reload with timeout fallback, and ad-filtered remote page loads.
+     * Test local HTTP/SOCKS5 proxy routing webview traffic through AdGuard DoH (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (`94.140.14.14:53`) via `WebviewBuilder.proxy_url()`.
+     * Verify macOS WKWebView proxy behavior and evaluate stability across macOS versions.
+  5. **Interaction Observation Check**:
+     * Test whether guest cross-origin click/scroll can be detected; confirm global keyboard shortcut (`Space` to pause/resume) as primary reliable control.
+* **Verification**: Functional prototype demonstrating bounds animation, sibling hide/show, JIT native reload with timeout skipping, and proxy adblock evaluation.
 
 ### Phase 1: Tauri v2 Project Scaffolding
 * Initialize Vite + TypeScript project with Bun in `ambient-kiosk`.
@@ -64,16 +66,15 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Routes DNS queries to AdGuard DoH/DoT/UDP.
   * Exposes local HTTP/SOCKS5 proxy on `127.0.0.1:<port>` when `adblock_dns_enabled` is active.
 * Implement asymmetric grid geometry calculator:
-  * 3/2 box layout for $N = 5$ (Row 0: 3 columns, Row 1: 2 columns).
-  * Respects reserved $40\,\text{px}$ header zone for controller HUD.
 * Implement bounded webview pool manager:
-  * Caps live webviews to $M = 5$ visible slots + $K = 1$ prefetch buffer.
-  * Background scheduling on asynchronous Tokio worker tasks.
+  * For baseline $N = 5$, maintain all 5 visible webviews resident simultaneously.
+  * Apply virtualization and slot re-navigation only when configured URLs exceed visible slots ($M = 5$).
+  * Limit in-flight reloads to at most 1 (the single upcoming target tile).
 * Implement Security Policies:
   * `on_navigation`: Restrict URLs strictly to `http`/`https` protocols.
   * `on_new_window`: Intercept popup requests; cancel popups or delegate to system browser.
   * Zero-capabilities ACL: Confirm guest webview labels are excluded from all IPC command capabilities.
-* **Verification**: Launch app with the 5 preset endpoints; verify all 5 render simultaneously without iframe blocking errors, with ads filtered.
+* **Verification**: Launch app with the 5 preset endpoints; verify all 5 render simultaneously without iframe blocking errors, with ad filtering active if Phase 0 proxy validation succeeded.
 
 ### Phase 4: Animation & Tour Engine with JIT Pre-Refresh
 * Implement Tour State Machine in Rust:
@@ -83,9 +84,10 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Timer loop updating bounds of focused webview from resting slot to $(0, 0, W, H)$.
   * Sibling-hide fallback: hide sibling webviews during maximization, restore on minimizing completion.
 * Implement JIT Pre-Refresh Trigger & PreparingNext State:
-  * Upon entering `Minimizing(i)`, invoke `next_webview.reload()` natively.
+  * Upon entering `Minimizing(i)`, invoke `next_webview.reload()` natively (coalesced to 1 in-flight request).
   * Upon completing minimization, transition to `PreparingNext(i + 1)`.
-  * Wait for webview page load completion event or elapse a 2.5s safety timeout, then advance to `GridRest` and `Maximizing(i + 1)`.
+  * Wait for `on_page_load(Finished)` event: on completion, advance to `GridRest` and `Maximizing(i + 1)`.
+  * On timeout (2.5s safety limit) or load failure: skip maximization for this cycle, retain existing slot content, and advance to prepare candidate $i + 2$.
   * Hold timer (e.g. 30 seconds).
   * Advance active index: $i_{\text{next}} = (i + 1) \pmod N$.
 * Expose control commands:
