@@ -119,24 +119,37 @@ graph TD
 
 ## 4. Layout & Motion Mechanics
 
-### 4.1 Full-Bleed Auto-Tiling & Asymmetric Grid Geometry
-To maximize screen estate on idle displays without wasted margins, the grid defaults to full-bleed dimensions ($p = 0, g = 0$).
+### 4.1 Scroll-Free Dynamic $M \times N$ Auto-Fitting Geometry
+The layout engine guarantees that all $N$ configured endpoints fit simultaneously inside the single coordinator window without outer window scrollbars or clipping, using 100% of the display canvas:
+* **Dynamic Scaling by Endpoint Count ($N$)**:
+  * Small endpoint counts scale down subdivisions for large readability per site:
+    * $N = 1 \implies 1 \times 1$ (single full-window tile)
+    * $N = 2 \implies 2 \times 1$ (side-by-side split)
+    * $N = 3 \implies 3 \times 1$ (three horizontal columns)
+    * $N = 4 \implies 2 \times 2$ (quadrant grid)
+    * $N = 5 \implies [3, 2]$ (3 columns top, 2 columns bottom)
+    * $N = 6 \implies 3 \times 2$ (six equal boxes)
+  * Larger endpoint counts automatically scale up subdivisions to preserve non-scrolling single-window visibility:
+    * $N = 7 \implies [4, 3]$ (4 columns top, 3 columns bottom)
+    * $N = 8 \implies 4 \times 2$
+    * $N = 9 \implies 3 \times 3$
+    * $N = 10 \implies [4, 3, 3]$ or $5 \times 2$
+    * $N = 12 \implies 4 \times 3$
 
-For $N = 5$ (default news preset) across window inner dimensions $(W, H)$ with padding $p$ and gap $g$:
-* Row count $R = 2$, split as 3 tiles in row 0 and 2 tiles in row 1.
-* Row height (equal 50% split for $p=0, g=0$):
-  $$h_{\text{slot}} = \frac{H - g - 2p}{2} \implies \frac{H}{2}$$
-* Row 0 (3 columns, slots 0, 1, 2) — 100% width coverage:
-  $$w_{\text{row0}} = \frac{W - 2g - 2p}{3} \implies \frac{W}{3}$$
-  $$x_i = p + i \cdot (w_{\text{row0}} + g) = i \cdot \frac{W}{3}, \quad y_i = p = 0$$
-* Row 1 (2 columns, slots 3, 4) — 100% width coverage:
-  $$w_{\text{row1}} = \frac{W - g - 2p}{2} \implies \frac{W}{2}$$
-  $$x_i = p + (i - 3) \cdot (w_{\text{row1}} + g) = (i - 3) \cdot \frac{W}{2}, \quad y_i = p + h_{\text{slot}} + g = \frac{H}{2}$$
-
-Total screen coverage:
-$$\text{Area} = 3 \cdot \left(\frac{W}{3} \cdot \frac{H}{2}\right) + 2 \cdot \left(\frac{W}{2} \cdot \frac{H}{2}\right) = \frac{W \cdot H}{2} + \frac{W \cdot H}{2} = W \cdot H \quad (100\%)$$
-
-For arbitrary $N$, row-by-row greedy distribution calculates $C = \lceil\sqrt{N}\rceil, R = \lceil N / C\rceil$, dynamically distributing column widths across each row so no empty gaps exist.
+* **Auto-Fitting Partitioning Algorithm**:
+  1. Compute row count $R$ to maintain landscape-appropriate tile aspect ratios for window dimensions $(W, H)$:
+     $$R = \text{clamp}\left(\left\lfloor \sqrt{N \cdot \frac{H}{W}} + 0.5 \right\rfloor, 1, N\right)$$
+  2. Distribute columns per row $c_r$ ($r \in [0, R - 1]$):
+     $$q = \lfloor N / R \rfloor, \quad m = N \pmod R$$
+     The first $m$ rows receive $c_r = q + 1$, and remaining rows receive $c_r = q$, ensuring $\sum_{r=0}^{R-1} c_r = N$.
+  3. Compute slot bounds for slot at row $r$ and column index $k \in [0, c_r - 1]$:
+     $$h_r = \frac{H - \text{header\_height} - (R - 1)g - 2p}{R}$$
+     $$w_{r, k} = \frac{W - (c_r - 1)g - 2p}{c_r}$$
+     $$x_{r, k} = p + k \cdot (w_{r, k} + g)$$
+     $$y_{r, k} = \text{header\_height} + p + r \cdot (h_r + g)$$
+  4. In full-bleed mode ($p = 0, g = 0, \text{header\_height} = 0$), each tile expands to exact fractional bounds:
+     $$w_{r, k} = \frac{W}{c_r}, \quad h_r = \frac{H}{R}, \quad x_{r, k} = k \cdot \frac{W}{c_r}, \quad y_{r, k} = r \cdot \frac{H}{R}$$
+     $$\sum_{r=0}^{R-1} c_r \cdot \left(\frac{W}{c_r} \cdot \frac{H}{R}\right) = W \cdot H \quad (100\% \text{ client area, zero scrollbars})$$
 ### 4.2 Native Child Webview Realities & Portable Fallbacks
 * **Z-Ordering Limitations**: Tauri v2's cross-platform `Webview` API provides `set_position`, `set_size`, `set_focus`, `hide`, `show`, and `close`, but lacks a portable `set_z_order` or `bring_to_front` method across OS backends.
 * **Maximization Fallback (Sibling Hide Strategy)**:
@@ -257,10 +270,10 @@ To eliminate silent shadowing (where saving changes to AppData would be ignored 
     "reserved_header_height_px": 0
   },
   "layout": {
+    "strategy": "auto",
+    "rows": null,
     "padding_px": 0,
-    "gap_px": 0,
-    "grid_columns": 3,
-    "custom_grid_preset": "3x2_asymmetric"
+    "gap_px": 0
   },
   "timing": {
     "grid_view_duration_ms": 20000,

@@ -1,6 +1,6 @@
 # Ambient Kiosk
 
-Ambient Kiosk is an ambient workspace and idle-screen dashboard application built with **Tauri v2**. It organizes arbitrary web endpoints into an auto-tiling, full-bleed grid occupying 100% of the screen estate without wasted space, and continuously alternates between:
+Ambient Kiosk is an ambient workspace and idle-screen dashboard application built with **Tauri v2**. It organizes arbitrary web endpoints into an auto-tiling, full-bleed grid occupying 100% of the screen estate without scrollbars or clipping (scaling dynamically from $1 \times 1$ up to dense $M \times N$ layouts as endpoint count changes), and continuously alternates between:
 1. **Multi-Website Grid View (Overview)**: All sites visible side-by-side in full-bleed layout for a configurable overview period (e.g., 20 seconds).
 2. **Single-Website Maximized View (Deep Read)**: A single site expands smoothly to full window size, holds for a dedicated reading period (e.g., 30 seconds), minimizes back, and returns to the multi-site grid view before advancing to the next site.
 
