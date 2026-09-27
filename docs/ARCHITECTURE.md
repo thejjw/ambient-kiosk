@@ -2,7 +2,13 @@
 
 ## 1. System Overview
 
-Ambient Kiosk is a dedicated multi-surface web dashboard designed for idle displays, wall monitors, and ambient workspaces. It organizes $N$ configured web endpoints into an auto-tiled layout (e.g., a $3 \times 2$ asymmetric grid for 5 presets: 3 top, 2 bottom), automatically runs a sequential tour that elevates each tile to full-screen view with a smooth transition, holds the view for a configured duration (e.g., 30 seconds), minimizes it back to its grid slot, and advances to the next tile.
+Ambient Kiosk is a dedicated multi-surface web dashboard designed for idle displays, wall monitors, and ambient workspaces. It organizes $N$ configured web endpoints into an auto-tiled layout that fills 100% of the window canvas with zero wasted margins.
+
+### Operational Cadence (Alternating Overview & Focus)
+The application continuously alternates between two complementary viewing modes:
+1. **Multi-Website Grid View (Overview)**: All configured websites are simultaneously displayed side-by-side in full-bleed layout for a configurable duration (e.g., `grid_view_duration_ms: 20000`). This gives the user a live, ambient pulse of all feeds at a glance.
+2. **Single-Website Maximized View (Deep Read)**: A single website smoothly expands from its grid slot to fill the entire window, holding for a dedicated reading period (e.g., `maximized_hold_duration_ms: 30000`).
+3. **Pipelined Transition**: The active site minimizes back into its resting slot, returning to the multi-website grid view, while the upcoming site is pre-refreshed in the background. The cycle repeats sequentially across all endpoints.
 
 ### Default Presets (News & Market Feeds)
 1. **Biztoc**: `https://biztoc.com/` (Business & financial headline stream)
@@ -10,7 +16,6 @@ Ambient Kiosk is a dedicated multi-surface web dashboard designed for idle displ
 3. **Biztoc Wire**: `https://biztoc.com/wire` (Real-time financial wire)
 4. **AP News Latest**: `https://apnews.com/hub/latest-news` (Breaking global news)
 5. **Finviz News**: `https://finviz.com/news` (Market news & visual analytics)
-
 ```
 +-------------------------------------------------------------------+
 |                           Window Frame                            |
@@ -114,20 +119,24 @@ graph TD
 
 ## 4. Layout & Motion Mechanics
 
-### 4.1 Auto-Tiling & Asymmetric Grid Geometry
-For $N = 5$ (default preset) across window dimensions $(W, H)$ with padding $p$ and gap $g$:
+### 4.1 Full-Bleed Auto-Tiling & Asymmetric Grid Geometry
+To maximize screen estate on idle displays without wasted margins, the grid defaults to full-bleed dimensions ($p = 0, g = 0$).
+
+For $N = 5$ (default news preset) across window inner dimensions $(W, H)$ with padding $p$ and gap $g$:
 * Row count $R = 2$, split as 3 tiles in row 0 and 2 tiles in row 1.
-* Row height:
-  $$h_{\text{slot}} = \frac{H - g - 2p}{2}$$
-* Row 0 (3 columns, slots 0, 1, 2):
-  $$w_{\text{row0}} = \frac{W - 2g - 2p}{3}, \quad x_i = p + i \cdot (w_{\text{row0}} + g), \quad y_i = p$$
-* Row 1 (2 columns, slots 3, 4):
-  $$w_{\text{row1}} = \frac{W - g - 2p}{2}, \quad x_i = p + (i - 3) \cdot (w_{\text{row1}} + g), \quad y_i = p + h_{\text{slot}} + g$$
+* Row height (equal 50% split for $p=0, g=0$):
+  $$h_{\text{slot}} = \frac{H - g - 2p}{2} \implies \frac{H}{2}$$
+* Row 0 (3 columns, slots 0, 1, 2) — 100% width coverage:
+  $$w_{\text{row0}} = \frac{W - 2g - 2p}{3} \implies \frac{W}{3}$$
+  $$x_i = p + i \cdot (w_{\text{row0}} + g) = i \cdot \frac{W}{3}, \quad y_i = p = 0$$
+* Row 1 (2 columns, slots 3, 4) — 100% width coverage:
+  $$w_{\text{row1}} = \frac{W - g - 2p}{2} \implies \frac{W}{2}$$
+  $$x_i = p + (i - 3) \cdot (w_{\text{row1}} + g) = (i - 3) \cdot \frac{W}{2}, \quad y_i = p + h_{\text{slot}} + g = \frac{H}{2}$$
 
-For arbitrary $N$, row-by-row greedy distribution calculates:
-$$C = \lceil\sqrt{N}\rceil, \quad R = \lceil N / C\rceil$$
-where remainder slots in the final row can either stretch across available width or retain the standard column width.
+Total screen coverage:
+$$\text{Area} = 3 \cdot \left(\frac{W}{3} \cdot \frac{H}{2}\right) + 2 \cdot \left(\frac{W}{2} \cdot \frac{H}{2}\right) = \frac{W \cdot H}{2} + \frac{W \cdot H}{2} = W \cdot H \quad (100\%)$$
 
+For arbitrary $N$, row-by-row greedy distribution calculates $C = \lceil\sqrt{N}\rceil, R = \lceil N / C\rceil$, dynamically distributing column widths across each row so no empty gaps exist.
 ### 4.2 Native Child Webview Realities & Portable Fallbacks
 * **Z-Ordering Limitations**: Tauri v2's cross-platform `Webview` API provides `set_position`, `set_size`, `set_focus`, `hide`, `show`, and `close`, but lacks a portable `set_z_order` or `bring_to_front` method across OS backends.
 * **Maximization Fallback (Sibling Hide Strategy)**:
@@ -137,8 +146,8 @@ where remainder slots in the final row can either stretch across available width
 * **HUD & Controller Occlusion**:
   * Because native OS child webviews (`NSView`/`CoreWebView2`) render above the coordinator window's HTML DOM canvas, an in-DOM HUD will be obscured if child views overlap it.
   * **Architecture Solutions**:
-    1. **Reserved Top Bar**: Window coordinator reserves a $40\,\text{px}$ header zone ($y \in [0, 40]$); child webviews are strictly bounded within $y \in [40, H]$.
-    2. **Frameless Overlay Window**: A dedicated secondary transparent window with `always_on_top(true)` for floating HUD controls.
+    1. **Configurable Reserved Header Zone**: `reserved_header_height_px` defaults to `0` for 100% full-bleed screen utilization. If a persistent header bar is configured (e.g. `reserved_header_height_px: 40`), child webview resting bounds shift downward to $y \in [\text{header\_height}, H]$.
+    2. **Frameless Overlay Window**: A dedicated secondary transparent window with `always_on_top(true)` for floating HUD controls without sacrificing main grid screen estate.
     3. **Global Shortcuts**: Tour controls driven via keyboard shortcuts (`Space` for pause, `Arrows` for navigation, `F11` for fullscreen).
 * **Interaction Observation Limitations**:
   * Because guest webviews host cross-origin remote URLs under zero-capability isolation, the host DOM cannot inspect guest click or scroll events. Automatic interaction pause is an unproven Phase 0 hypothesis; global keyboard controls (`Space` to pause/resume) serve as the primary guaranteed control.
@@ -155,88 +164,158 @@ To update headlines and charts before expansion:
 ## 5. Tour Engine & State Machine
 
 ```
-              +-----------------------------+
-              |           Stopped           |
-              +-----------------------------+
-                             | start_tour()
-                             v
-              +-----------------------------+
-              |          GridRest           | <------------------------+
-              +-----------------------------+                          |
-                             |                                         |
-              advance_timer  | select index i                          |
-                             v                                         |
-              +-----------------------------+                          |
-              |      Maximizing(index)      |                          |
-              +-----------------------------+                          |
-                             | anim_complete                           |
-                             v                                         |
-     user     +-----------------------------+                          |
-   interact   |      Maximized(index)       |                          |
-  +---------> |      (Hold for 30s)         |                          |
-  |           +-----------------------------+                          |
-  | resume_tour              | hold_complete                           |
-  |                          v                                         |
-  +---------- +-----------------------------+                          |
-   (paused)   |      Minimizing(index)      |                          |
-              |  * next_webview.reload() *  |                          |
-              +-----------------------------+                          |
-                             | anim_complete                           |
-                             v                                         |
-              +-----------------------------+                          |
-              |    PreparingNext(index + 1) |                          |
-              | (Wait on load_done | timeout)|                         |
-              +-----------------------------+                          |
-                             | load_done                               |
-                             |---------------------------------------->|
-                             | timeout (2.5s) / error                  |
-                             | (leave unmaximized in slot)             |
-                             +---------------------------------------->| (advance to index + 2)
-                                           index = (i + 1) % N
+              +-----------------------------------------+
+              |                 Stopped                 |
+              +-----------------------------------------+
+                                     | start_tour()
+                                     v
+              +-----------------------------------------+
+              |        GridView (All Sites Live)        | <------------------------+
+              |    (Overview hold: e.g. 20 seconds)     |                          |
+              +-----------------------------------------+                          |
+                                     |                                             |
+                      advance_timer  | select target index i                       |
+                                     v                                             |
+              +-----------------------------------------+                          |
+              |            Maximizing(index)            |                          |
+              +-----------------------------------------+                          |
+                                     | anim_complete                               |
+                                     v                                             |
+     user     +-----------------------------------------+                          |
+   interact   |        MaximizedSingleSite(index)       |                          |
+  +---------> |      (Deep Read: e.g. 30 seconds)       |                          |
+  |           +-----------------------------------------+                          |
+  | resume_tour                      | hold_complete                               |
+  |                                  v                                             |
+  +---------- +-----------------------------------------+                          |
+   (paused)   |            Minimizing(index)            |                          |
+              |        * next_webview.reload() *        |                          |
+              +-----------------------------------------+                          |
+                                     | anim_complete                               |
+                                     v                                             |
+              +-----------------------------------------+                          |
+              |         PreparingNext(index + 1)        |                          |
+              |       (Awaiting load_done | timeout)    |                          |
+              +-----------------------------------------+                          |
+                                     | load_done                                   |
+                                     |-------------------------------------------->|
+                                     | timeout (2.5s) / error                      |
+                                     | (leave unmaximized in slot)                 |
+                                     +-------------------------------------------->| (advance index)
+                                                   index = (i + 1) % N
 ```
 
 ### 5.1 State Definitions
-* **`Stopped`**: No active tour. Webviews remain in fixed grid layout.
-* **`GridRest`**: Brief pause showing the entire grid before the next expansion begins.
-* **`Maximizing(i)`**: Animating bounds of webview $i$ from resting to full viewport.
-* **`Maximized(i)`**: Webview $i$ fully expanded. Hold timer active (e.g., 30 seconds).
-* **`Minimizing(i)`**: Animating bounds of webview $i$ from full viewport back to resting slot. Triggers `next_webview.reload()`.
-* **`PreparingNext(target)`**: Transitional state between minimization and the next maximization. Awaits the first `on_page_load(Finished)` event for the pending target webview while guarding against stale timeouts via an internal `tour_generation` token.
-  * **On load finish**: Clears pending reload flag, advances to `GridRest` and then `Maximizing(target)`.
-  * **On timeout (2.5s) or load error**: Leaves the incomplete webview unmaximized in its resting slot, clears pending reload flag, skips expansion for this cycle, and advances to prepare candidate $i + 2$.
-* **`Paused`**: Tour timer paused via keyboard shortcut (`Space`) or manual HUD control. Resumes upon unpause.
+* **`Stopped`**: Tour halted. All webviews remain static in full-bleed grid layout.
+* **`GridView`**: All configured webviews visible and active side-by-side in full-bleed layout. Held for `grid_view_duration_ms` (e.g. 20 seconds) so the user gets an overall ambient briefing.
+* **`Maximizing(i)`**: Interpolating bounds of webview $i$ from resting grid slot to full window viewport $(0, 0, W, H)$.
+* **`MaximizedSingleSite(i)`**: Webview $i$ fully expanded to 100% of window. Hold timer active for `maximized_hold_duration_ms` (e.g., 30 seconds).
+* **`Minimizing(i)`**: Interpolating bounds of webview $i$ from full viewport back to its resting grid slot. Fires `next_webview.reload()` if target is idle.
+* **`PreparingNext(target)`**: Transitional state between minimization and the next grid cycle. Awaits the first `on_page_load(Finished)` event for the pending target webview while guarding against stale timeouts via an internal `tour_generation` token.
+  * **On load finish**: Clears pending reload flag and advances to `GridView`.
+  * **On timeout (2.5s) or load error**: Leaves the incomplete webview unmaximized in its resting slot, clears pending reload flag, and advances to `GridView` with candidate incremented.
+* **`Paused`**: Tour timer paused via keyboard shortcut (`Space`) or HUD control. Resumes upon unpause.
 ---
 
-## 6. Configuration Schema
+## 6. Comprehensive Configuration Schema & Portable Discovery
 
-Configuration is persisted locally (e.g., in `$APP_CONFIG_DIR/config.json`) and exposed via a lightweight settings drawer.
+### 6.1 Configuration Precedence & Platform Resolution
+To maximize deployment flexibility while respecting OS security boundaries and code signing (preventing damage to macOS `.app` bundle signatures), configuration files are resolved in strict priority order:
+1. **Explicit CLI / Environment Override**:
+   `--config <path>` command-line argument or `KIOSK_CONFIG=<path>` environment variable.
+2. **Portable Bundle-Adjacent Config (Read-Only Override)**:
+   * On macOS: `kiosk-config.json` located adjacent to `AmbientKiosk.app` (resolved by traversing up from the inner executable past `Contents/MacOS` to the directory hosting `.app`). The application never writes or auto-generates files inside `Contents/MacOS`, preserving code-signing seal integrity.
+   * On Windows/Linux: `kiosk-config.json` situated in the same folder as the executable binary.
+   * When detected, this file acts as a read-only portable configuration override.
+3. **User Application Support Directory (Writable Preferences)**:
+   * macOS: `~/Library/Application Support/ambient-kiosk/config.json`
+   * Windows: `%APPDATA%\ambient-kiosk\config.json`
+   * Linux: `~/.config/ambient-kiosk/config.json`
+   * All in-app settings changes and UI preference saves write exclusively to this path.
+4. **Compiled Defaults**:
+   Hardcoded presets used if no external configuration file exists.
+### 6.2 Configuration Schema
 
 ```json
 {
   "version": 1,
-  "settings": {
-    "hold_duration_ms": 30000,
+  "window": {
+    "fullscreen": true,
+    "decorations": false,
+    "background_color": "#0d0d0d",
+    "reserved_header_height_px": 0
+  },
+  "layout": {
+    "padding_px": 0,
+    "gap_px": 0,
+    "grid_columns": 3,
+    "custom_grid_preset": "3x2_asymmetric"
+  },
+  "timing": {
+    "grid_view_duration_ms": 20000,
+    "maximized_hold_duration_ms": 30000,
     "transition_duration_ms": 500,
-    "grid_rest_duration_ms": 2000,
-    "refresh_before_maximize": true,
-    "auto_start_tour": true,
+    "preparing_timeout_ms": 2500,
+    "user_idle_resume_ms": 15000
+  },
+  "tour": {
+    "auto_start": true,
     "pause_on_interaction": true,
-    "user_idle_resume_ms": 15000,
-    "mute_audio": true,
-    "active_pool_size": 5,
-    "prefetch_buffer_size": 1,
+    "refresh_before_maximize": true,
+    "loop": true
+  },
+  "network_dns": {
     "adblock_dns_enabled": true,
     "dns_provider": "adguard_doh",
     "doh_url": "https://dns.adguard-dns.com/dns-query",
     "dot_url": "tls://dns.adguard-dns.com",
     "plain_dns_ip": "94.140.14.14:53"
   },
+  "pool": {
+    "active_pool_size": 5,
+    "prefetch_buffer_size": 1
+  },
   "endpoints": [
-    { "id": "1", "title": "Biztoc", "url": "https://biztoc.com/" },
-    { "id": "2", "title": "Alltoc", "url": "https://alltoc.com/" },
-    { "id": "3", "title": "Biztoc Wire", "url": "https://biztoc.com/wire" },
-    { "id": "4", "title": "AP News Latest", "url": "https://apnews.com/hub/latest-news" },
-    { "id": "5", "title": "Finviz News", "url": "https://finviz.com/news" }
+    {
+      "id": "1",
+      "title": "Biztoc",
+      "url": "https://biztoc.com/",
+      "zoom_factor": 1.0,
+      "muted": true,
+      "reload_interval_minutes": 15
+    },
+    {
+      "id": "2",
+      "title": "Alltoc",
+      "url": "https://alltoc.com/",
+      "zoom_factor": 1.0,
+      "muted": true,
+      "reload_interval_minutes": 15
+    },
+    {
+      "id": "3",
+      "title": "Biztoc Wire",
+      "url": "https://biztoc.com/wire",
+      "zoom_factor": 1.0,
+      "muted": true,
+      "reload_interval_minutes": 15
+    },
+    {
+      "id": "4",
+      "title": "AP News Latest",
+      "url": "https://apnews.com/hub/latest-news",
+      "zoom_factor": 0.9,
+      "muted": true,
+      "reload_interval_minutes": 15
+    },
+    {
+      "id": "5",
+      "title": "Finviz News",
+      "url": "https://finviz.com/news",
+      "zoom_factor": 0.9,
+      "muted": true,
+      "reload_interval_minutes": 15
+    }
   ]
 }
 ```

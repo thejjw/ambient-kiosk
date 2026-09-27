@@ -1,6 +1,8 @@
 # Ambient Kiosk
 
-Ambient Kiosk is an ambient workspace and idle-screen dashboard application built with **Tauri v2**. It organizes arbitrary web endpoints into an auto-tiling grid (e.g. an asymmetric $3 \times 2$ grid for 5 news presets) and runs an automated tour—elevating each site to full screen with a smooth transition, holding for a configured duration (e.g., 30 seconds), minimizing it back to its grid slot, and cycling through the list.
+Ambient Kiosk is an ambient workspace and idle-screen dashboard application built with **Tauri v2**. It organizes arbitrary web endpoints into an auto-tiling, full-bleed grid occupying 100% of the screen estate without wasted space, and continuously alternates between:
+1. **Multi-Website Grid View (Overview)**: All sites visible side-by-side in full-bleed layout for a configurable overview period (e.g., 20 seconds).
+2. **Single-Website Maximized View (Deep Read)**: A single site expands smoothly to full window size, holds for a dedicated reading period (e.g., 30 seconds), minimizes back, and returns to the multi-site grid view before advancing to the next site.
 
 ### Default Presets (News & Markets)
 1. **Biztoc** (`https://biztoc.com/`)
@@ -30,6 +32,10 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
 4. **Pipelined Pre-Refresh (Planned)**: Design initiates a native background reload (`Webview::reload()`) on the upcoming tile during minimization to pipeline content updates before expansion (readiness and fallback behavior subject to Phase 0 feasibility spike).
 5. **Bounded Lifecycle Pool**: Caps active child webviews to visible slots ($M = 5$) plus a bounded prefetch buffer ($K = 1$), avoiding runaway webview process count and memory consumption.
 6. **AdGuard DNS Adblocking (Planned / Spike)**: Proposed architecture defaults to routing child webview requests through an embedded loopback proxy resolving via AdGuard DNS-over-HTTPS (`https://dns.adguard-dns.com/dns-query`) or plain DNS fallback (`94.140.14.14:53`), with a user configurable option to opt into unproxied system DNS (macOS WKWebView proxy viability subject to Phase 0 spike).
+7. **High Configurability & Safe Discovery**:
+   * CLI / Env override: `--config <path>` or `KIOSK_CONFIG=<path>`.
+   * Portable bundle/binary-adjacent config (`kiosk-config.json` beside `App.app` on macOS or `.exe` on Windows/Linux) as a read-only override (never auto-writing into signed bundles).
+   * Writable user preferences in standard OS AppData directories.
 ---
 
 ## Documentation
