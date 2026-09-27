@@ -43,8 +43,79 @@ async fn resolve_with_adguard_doh(host: &str) -> Option<IpAddr> {
     }
     None
 }
+/// Fallback plain DNS resolver querying AdGuard at 94.140.14.14:53 over UDP.
+async fn resolve_with_adguard_plain_udp(host: &str) -> Option<IpAddr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip);
+    }
 
-/// Local HTTP CONNECT proxy routing DNS through AdGuard DoH with controllable stall simulation route.
+    // Construct DNS A query
+    let mut packet = Vec::with_capacity(512);
+    packet.extend_from_slice(&[0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        packet.push(label.len() as u8);
+        packet.extend_from_slice(label.as_bytes());
+    }
+    packet.push(0);
+    packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // Type A, Class IN
+
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    let adguard_addr: SocketAddr = "94.140.14.14:53".parse().ok()?;
+    socket.connect(adguard_addr).await.ok()?;
+    socket.send(&packet).await.ok()?;
+
+    let mut buf = [0u8; 512];
+    let n = tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut buf)).await.ok()?.ok()?;
+    let resp = &buf[..n];
+    if resp.len() < 12 {
+        return None;
+    }
+    let ancount = u16::from_be_bytes([resp[6], resp[7]]);
+    if ancount == 0 {
+        return None;
+    }
+
+    let mut idx = 12;
+    while idx < resp.len() && resp[idx] != 0 {
+        if resp[idx] & 0xc0 == 0xc0 {
+            idx += 1;
+            break;
+        }
+        idx += (resp[idx] as usize) + 1;
+    }
+    idx += 5;
+
+    for _ in 0..ancount {
+        if idx >= resp.len() {
+            break;
+        }
+        if resp[idx] & 0xc0 == 0xc0 {
+            idx += 2;
+        } else {
+            while idx < resp.len() && resp[idx] != 0 {
+                idx += (resp[idx] as usize) + 1;
+            }
+            idx += 1;
+        }
+        if idx + 10 > resp.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([resp[idx], resp[idx + 1]]);
+        let rdlength = u16::from_be_bytes([resp[idx + 8], resp[idx + 9]]) as usize;
+        idx += 10;
+        if rtype == 1 && rdlength == 4 && idx + 4 <= resp.len() {
+            let ip = std::net::Ipv4Addr::new(resp[idx], resp[idx + 1], resp[idx + 2], resp[idx + 3]);
+            return Some(IpAddr::V4(ip));
+        }
+        idx += rdlength;
+    }
+    None
+}
+
+/// Local HTTP CONNECT proxy routing DNS strictly through AdGuard (DoH with plain UDP fallback).
 async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
     ready.store(true, Ordering::SeqCst);
     let addr = listener.local_addr().unwrap();
@@ -94,16 +165,19 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
                             ip
                         }
                         None => {
-                            println!("[AdGuard-Proxy] [DOH-FALLBACK] Resolving '{}' via system DNS", host);
-                            match tokio::net::lookup_host((host, port)).await {
-                                Ok(mut addrs) => match addrs.next() {
-                                    Some(sa) => sa.ip(),
-                                    None => {
-                                        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                            println!("[AdGuard-Proxy] [DOH-FALLBACK] Resolving '{}' via AdGuard plain DNS 94.140.14.14:53", host);
+                            match resolve_with_adguard_plain_udp(host).await {
+                                Some(ip) => {
+                                    if ip.is_unspecified() {
+                                        println!("[AdGuard-Proxy] [BLOCKED] Domain '{}' resolved to 0.0.0.0 by AdGuard plain DNS", host);
+                                        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
                                         return;
                                     }
-                                },
-                                Err(_) => {
+                                    println!("[AdGuard-Proxy] [RESOLVED] '{}' -> {} via AdGuard plain DNS", host, ip);
+                                    ip
+                                }
+                                None => {
+                                    println!("[AdGuard-Proxy] [RESOLUTION-FAILED] Domain '{}' unresolvable via AdGuard DNS", host);
                                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
                                     return;
                                 }
@@ -299,6 +373,8 @@ fn main() {
                 let current_gen = gen.fetch_add(1, Ordering::SeqCst);
                 println!("[Spike] Advance generation token to: {}", current_gen + 1);
 
+                // START TIMER IMMEDIATELY BEFORE RELOAD INVOCATION
+                let reload_start = Instant::now();
                 assert!(wv1_clone.reload().is_ok(), "reload() on inactive webview must succeed");
                 println!("[Spike] [PASS] Triggered native reload() on 'spike-1'");
 
@@ -318,8 +394,7 @@ fn main() {
                 assert!(wv1_clone.show().is_ok(), "wv1 show must succeed");
                 println!("[Spike] [PASS] Sibling 'spike-1' restored with show()");
 
-                // Await and assert that reload actually signaled PageLoadEvent::Finished
-                let reload_start = Instant::now();
+                // Await PageLoadEvent::Finished using reload_start initialized before reload()
                 let mut finished_received = false;
                 while reload_start.elapsed() < Duration::from_secs(5) {
                     if load_finished.load(Ordering::SeqCst) {
