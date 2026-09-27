@@ -128,21 +128,39 @@ impl TourStateMachine {
         let target = target_idx % self.total_tiles;
         let transition_duration = Duration::from_millis(self.timing.lock().transition_duration_ms);
         let mut data = self.state.lock();
-        data.current_state = TourStateName::Maximizing;
+        let was_paused = data.is_paused;
         data.active_index = target;
         data.state_start = Instant::now();
         data.target_duration = transition_duration;
+
+        if was_paused {
+            data.current_state = TourStateName::Paused;
+            data.previous_state_before_pause = TourStateName::Maximizing;
+            data.paused_elapsed = Duration::ZERO;
+        } else {
+            data.current_state = TourStateName::Maximizing;
+        }
+
         (target, transition_duration)
     }
 
     /// Completes Maximizing and enters MaximizedSingleSite hold.
-    pub fn finish_maximizing(&self) -> Duration {
+    /// Preserves Paused state and resets paused_elapsed to ZERO if paused mid-animation.
+    pub fn finish_maximizing(&self) -> TourStateName {
         let hold_duration = Duration::from_millis(self.timing.lock().maximized_hold_duration_ms);
         let mut data = self.state.lock();
-        data.current_state = TourStateName::MaximizedSingleSite;
         data.state_start = Instant::now();
         data.target_duration = hold_duration;
-        hold_duration
+
+        if data.is_paused {
+            data.current_state = TourStateName::Paused;
+            data.previous_state_before_pause = TourStateName::MaximizedSingleSite;
+            data.paused_elapsed = Duration::ZERO;
+            TourStateName::Paused
+        } else {
+            data.current_state = TourStateName::MaximizedSingleSite;
+            TourStateName::MaximizedSingleSite
+        }
     }
 
     /// Prepares state for Minimizing transition, setting up candidate reload tracking.
@@ -153,7 +171,7 @@ impl TourStateMachine {
         let gen = self.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
 
         let mut data = self.state.lock();
-        data.current_state = TourStateName::Minimizing;
+        let was_paused = data.is_paused;
         data.state_start = Instant::now();
         data.target_duration = transition_duration;
         data.candidate_index = candidate;
@@ -161,32 +179,47 @@ impl TourStateMachine {
         data.pending_reload = Some((candidate, gen));
         data.candidate_reload_finished = false;
 
+        if was_paused {
+            data.current_state = TourStateName::Paused;
+            data.previous_state_before_pause = TourStateName::Minimizing;
+            data.paused_elapsed = Duration::ZERO;
+        } else {
+            data.current_state = TourStateName::Minimizing;
+        }
+
         (target, candidate, gen, transition_duration)
     }
 
     /// Completes Minimizing.
-    /// If candidate already finished loading during minimization, transitions directly to GridView.
-    /// Otherwise enters PreparingNext with safety timeout deadline.
+    /// Preserves Paused state and resets paused_elapsed to ZERO if paused mid-animation.
     pub fn finish_minimizing(&self) -> TourStateName {
         let mut data = self.state.lock();
-        if data.candidate_reload_finished {
+        let destination_state = if data.candidate_reload_finished {
             let grid_duration = Duration::from_millis(self.timing.lock().grid_view_duration_ms);
-            data.current_state = TourStateName::GridView;
-            data.state_start = Instant::now();
             data.target_duration = grid_duration;
             data.pending_reload = None;
             TourStateName::GridView
         } else {
             let timeout_duration = Duration::from_millis(self.timing.lock().preparing_timeout_ms);
-            data.current_state = TourStateName::PreparingNext;
-            data.state_start = Instant::now();
             data.target_duration = timeout_duration;
             TourStateName::PreparingNext
+        };
+
+        data.state_start = Instant::now();
+
+        if data.is_paused {
+            data.current_state = TourStateName::Paused;
+            data.previous_state_before_pause = destination_state;
+            data.paused_elapsed = Duration::ZERO;
+            TourStateName::Paused
+        } else {
+            data.current_state = destination_state;
+            destination_state
         }
     }
 
     /// Handles page load finished event from the webview event channel.
-    /// Matches BOTH candidate index AND the reload generation token.
+    /// If paused in PreparingNext, transitions the paused destination to GridView.
     pub fn on_page_load_finished(&self, loaded_index: usize, event_gen: u64) -> bool {
         let mut data = self.state.lock();
         if data.pending_reload == Some((loaded_index, event_gen)) {
@@ -198,6 +231,15 @@ impl TourStateMachine {
                 data.target_duration = grid_duration;
                 data.pending_reload = None;
                 return true;
+            } else if data.is_paused && data.previous_state_before_pause == TourStateName::PreparingNext {
+                // Loaded while paused in PreparingNext: update destination to GridView and reset paused_elapsed
+                let grid_duration = Duration::from_millis(self.timing.lock().grid_view_duration_ms);
+                data.previous_state_before_pause = TourStateName::GridView;
+                data.state_start = Instant::now();
+                data.target_duration = grid_duration;
+                data.paused_elapsed = Duration::ZERO;
+                data.pending_reload = None;
+                return true;
             }
         }
         false
@@ -207,16 +249,26 @@ impl TourStateMachine {
     /// Guarded by expected generation token to invalidate stale timeout tasks.
     pub fn on_preparing_timeout(&self, expected_gen: u64) -> Option<usize> {
         let mut data = self.state.lock();
-        if data.current_state == TourStateName::PreparingNext && data.tour_generation == expected_gen {
+        let matches_preparing = data.current_state == TourStateName::PreparingNext
+            || (data.is_paused && data.previous_state_before_pause == TourStateName::PreparingNext);
+
+        if matches_preparing && data.tour_generation == expected_gen {
             let next_candidate = (data.candidate_index + 1) % self.total_tiles;
             data.candidate_index = next_candidate;
             data.pending_reload = None;
             data.candidate_reload_finished = false;
 
             let grid_duration = Duration::from_millis(self.timing.lock().grid_view_duration_ms);
-            data.current_state = TourStateName::GridView;
             data.state_start = Instant::now();
             data.target_duration = grid_duration;
+
+            if data.is_paused {
+                data.previous_state_before_pause = TourStateName::GridView;
+                data.paused_elapsed = Duration::ZERO;
+            } else {
+                data.current_state = TourStateName::GridView;
+            }
+
             Some(next_candidate)
         } else {
             None
@@ -700,5 +752,102 @@ mod tests {
         assert!(real_accepted, "Legitimate Finished event with matching generation must be accepted");
         assert_eq!(machine.state.lock().current_state, TourStateName::GridView);
         assert_eq!(machine.state.lock().pending_reload, None);
+    }
+
+    #[test]
+    fn test_pause_mid_flight_maximizing_preserves_paused_and_resets_elapsed() {
+        let machine = TourStateMachine::new(TimingConfig::default(), 5);
+        machine.start();
+
+        // 1. Begin maximizing tile 0
+        machine.begin_maximizing(0);
+        assert_eq!(machine.state.lock().current_state, TourStateName::Maximizing);
+
+        // 2. User presses Space / calls pause() mid-animation!
+        machine.pause();
+        assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
+        assert!(machine.state.lock().is_paused);
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::Maximizing);
+
+        // Wait 50ms while paused
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 3. Maximization animation completes in background and calls finish_maximizing
+        let res = machine.finish_maximizing();
+
+        // INVARIANT: State must remain Paused, NOT overwritten to MaximizedSingleSite!
+        assert_eq!(res, TourStateName::Paused);
+        assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
+        assert!(machine.state.lock().is_paused);
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::MaximizedSingleSite);
+        // INVARIANT: paused_elapsed is reset to ZERO so resume does not backdate hold!
+        assert_eq!(machine.state.lock().paused_elapsed, Duration::ZERO);
+
+        // 4. User resumes later
+        machine.resume();
+        assert_eq!(machine.state.lock().current_state, TourStateName::MaximizedSingleSite);
+        assert!(!machine.state.lock().is_paused);
+        let elapsed = machine.state.lock().state_start.elapsed();
+        // Elapsed should be fresh (~0ms), not containing the 50ms animation pause!
+        assert!(elapsed < Duration::from_millis(30));
+    }
+
+    #[test]
+    fn test_reload_finished_while_paused_in_preparing_next_updates_destination_to_grid_view() {
+        let machine = TourStateMachine::new(TimingConfig::default(), 5);
+        machine.start();
+
+        // 1. Minimizing tile 0 -> upcoming candidate is 1
+        let (_, _, gen, _) = machine.begin_minimizing(0);
+        let next_state = machine.finish_minimizing();
+        assert_eq!(next_state, TourStateName::PreparingNext);
+
+        // 2. User pauses while waiting in PreparingNext
+        machine.pause();
+        assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::PreparingNext);
+        assert_eq!(machine.state.lock().pending_reload, Some((1, gen)));
+
+        // 3. Candidate 1 finishes loading while user is paused
+        let accepted = machine.on_page_load_finished(1, gen);
+        assert!(accepted, "Reload finish must be accepted while paused");
+
+        // INVARIANT: Remains Paused, but destination is updated to GridView and pending cleared!
+        assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::GridView);
+        assert_eq!(machine.state.lock().pending_reload, None);
+        assert_eq!(machine.state.lock().candidate_index, 1);
+
+        // 4. User resumes: must enter GridView smoothly without re-entering PreparingNext or timing out
+        machine.resume();
+        assert_eq!(machine.state.lock().current_state, TourStateName::GridView);
+    }
+
+    #[test]
+    fn test_timeout_while_paused_in_preparing_next_advances_candidate_and_keeps_paused() {
+        let machine = TourStateMachine::new(TimingConfig::default(), 5);
+        machine.start();
+
+        // 1. Minimizing tile 0 -> upcoming candidate is 1
+        let (_, _, gen, _) = machine.begin_minimizing(0);
+        let _ = machine.finish_minimizing();
+
+        // 2. User pauses in PreparingNext
+        machine.pause();
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::PreparingNext);
+
+        // 3. Timeout triggers on generation token while paused
+        let advanced = machine.on_preparing_timeout(gen);
+        assert_eq!(advanced, Some(2));
+
+        // INVARIANT: Remains Paused, destination updated to GridView, candidate advanced to 2!
+        assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
+        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::GridView);
+        assert_eq!(machine.state.lock().candidate_index, 2);
+        assert_eq!(machine.state.lock().pending_reload, None);
+
+        // 4. Resume enters GridView with candidate 2
+        machine.resume();
+        assert_eq!(machine.state.lock().current_state, TourStateName::GridView);
     }
 }
