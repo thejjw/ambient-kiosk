@@ -11,6 +11,7 @@ pub struct LogicalRect {
 
 /// Dynamically calculates a scroll-free, full-bleed grid layout for `count` endpoints.
 /// Evaluates candidate row counts $r \in [1, count]$ against `target_aspect` (default 1.4).
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_grid_layout(
     win_width: f64,
     win_height: f64,
@@ -143,7 +144,8 @@ mod tests {
 
     #[test]
     fn test_explicit_rows_override() {
-        let (rects, rows) = calculate_grid_layout(1920.0, 1080.0, 5, 1.4, Some(&[2, 3]), 0.0, 0.0, 0.0);
+        let (rects, rows) =
+            calculate_grid_layout(1920.0, 1080.0, 5, 1.4, Some(&[2, 3]), 0.0, 0.0, 0.0);
         assert_eq!(rows, vec![2, 3]);
         assert_eq!(rects.len(), 5);
         assert_eq!(rects[0].width, 960.0);

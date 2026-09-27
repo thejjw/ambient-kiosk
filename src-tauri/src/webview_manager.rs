@@ -21,6 +21,11 @@ pub enum TileLoadState {
 pub struct TileLoadCoordinator {
     pub state: Mutex<TileLoadState>,
 }
+impl Default for TileLoadCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TileLoadCoordinator {
     pub fn new() -> Self {
@@ -101,9 +106,8 @@ pub fn spawn_resident_webviews(
         ));
     }
 
-    let proxy_url_parsed = proxy_port.and_then(|port| {
-        Url::parse(&format!("http://127.0.0.1:{}", port)).ok()
-    });
+    let proxy_url_parsed =
+        proxy_port.and_then(|port| Url::parse(&format!("http://127.0.0.1:{}", port)).ok());
 
     let mut tiles = Vec::with_capacity(endpoints.len());
 
@@ -121,7 +125,7 @@ pub fn spawn_resident_webviews(
         }
 
         // Security Policy 1: Constrain navigation strictly to HTTP/HTTPS
-        builder = builder.on_navigation(|nav_url| is_allowed_navigation_scheme(nav_url));
+        builder = builder.on_navigation(is_allowed_navigation_scheme);
 
         // Security Policy 2: Reject all popup windows from guest web content
         builder = builder.on_new_window(|_url, _features| NewWindowResponse::Deny);
@@ -165,13 +169,27 @@ mod tests {
 
     #[test]
     fn test_navigation_scheme_security() {
-        assert!(is_allowed_navigation_scheme(&Url::parse("https://example.com/").unwrap()));
-        assert!(is_allowed_navigation_scheme(&Url::parse("http://example.com/").unwrap()));
-        assert!(!is_allowed_navigation_scheme(&Url::parse("file:///etc/passwd").unwrap()));
-        assert!(!is_allowed_navigation_scheme(&Url::parse("data:text/html,<html>").unwrap()));
-        assert!(!is_allowed_navigation_scheme(&Url::parse("javascript:alert(1)").unwrap()));
-        assert!(!is_allowed_navigation_scheme(&Url::parse("tauri://localhost").unwrap()));
-        assert!(!is_allowed_navigation_scheme(&Url::parse("custom://malicious").unwrap()));
+        assert!(is_allowed_navigation_scheme(
+            &Url::parse("https://example.com/").unwrap()
+        ));
+        assert!(is_allowed_navigation_scheme(
+            &Url::parse("http://example.com/").unwrap()
+        ));
+        assert!(!is_allowed_navigation_scheme(
+            &Url::parse("file:///etc/passwd").unwrap()
+        ));
+        assert!(!is_allowed_navigation_scheme(
+            &Url::parse("data:text/html,<html>").unwrap()
+        ));
+        assert!(!is_allowed_navigation_scheme(
+            &Url::parse("javascript:alert(1)").unwrap()
+        ));
+        assert!(!is_allowed_navigation_scheme(
+            &Url::parse("tauri://localhost").unwrap()
+        ));
+        assert!(!is_allowed_navigation_scheme(
+            &Url::parse("custom://malicious").unwrap()
+        ));
     }
 
     #[test]

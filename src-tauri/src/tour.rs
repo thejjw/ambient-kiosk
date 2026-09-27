@@ -47,6 +47,11 @@ pub struct TourStateData {
     pub pending_reload: Option<(usize, u64)>,
     pub candidate_reload_finished: bool,
 }
+impl Default for TourStateData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TourStateData {
     pub fn new() -> Self {
@@ -242,7 +247,9 @@ impl TourStateMachine {
                 data.target_duration = grid_duration;
                 data.pending_reload = None;
                 return true;
-            } else if data.is_paused && data.previous_state_before_pause == TourStateName::PreparingNext {
+            } else if data.is_paused
+                && data.previous_state_before_pause == TourStateName::PreparingNext
+            {
                 // Loaded while paused in PreparingNext: update destination to GridView and reset paused_elapsed
                 let grid_duration = Duration::from_millis(self.timing.lock().grid_view_duration_ms);
                 data.previous_state_before_pause = TourStateName::GridView;
@@ -355,7 +362,9 @@ impl TourController {
         let titles: Vec<String> = self.tiles.iter().map(|t| t.title.clone()).collect();
         let payload = self.machine.get_status_payload(&titles);
         // Strictly target HUD overlay window, never guest webviews
-        let _ = self.app_handle.emit_to("hud-overlay", "tour-status-update", payload);
+        let _ = self
+            .app_handle
+            .emit_to("hud-overlay", "tour-status-update", payload);
     }
     pub fn start(&self) {
         self.is_running.store(true, Ordering::SeqCst);
@@ -389,7 +398,8 @@ impl TourController {
 
         let anim_gen = self.geometry_generation.load(Ordering::SeqCst);
         let steps = 25;
-        let step_delay = Duration::from_millis((transition_duration.as_millis() as u64 / steps as u64).max(1));
+        let step_delay =
+            Duration::from_millis((transition_duration.as_millis() as u64 / steps as u64).max(1));
         let (full_w, full_h_raw) = *self.window_geometry.lock();
         let full_h = full_h_raw - self.reserved_header_height;
         let full_y = self.reserved_header_height;
@@ -421,7 +431,10 @@ impl TourController {
             let (curr_w, curr_h_raw) = *self.window_geometry.lock();
             let curr_h = curr_h_raw - self.reserved_header_height;
             let _ = self.tiles[target].webview.set_bounds(Rect {
-                position: tauri::Position::Logical(LogicalPosition::new(0.0, self.reserved_header_height)),
+                position: tauri::Position::Logical(LogicalPosition::new(
+                    0.0,
+                    self.reserved_header_height,
+                )),
                 size: tauri::Size::Logical(LogicalSize::new(curr_w, curr_h)),
             });
         } else if self.geometry_generation.load(Ordering::SeqCst) == anim_gen {
@@ -439,7 +452,8 @@ impl TourController {
         if self.tiles.is_empty() {
             return;
         }
-        let (target, candidate, gen, transition_duration) = self.machine.begin_minimizing(target_idx);
+        let (target, candidate, gen, transition_duration) =
+            self.machine.begin_minimizing(target_idx);
         self.emit_status();
 
         // Trigger native reload paired with this exact generation token
@@ -448,7 +462,8 @@ impl TourController {
         // Interpolate back to resting slot
         let anim_gen = self.geometry_generation.load(Ordering::SeqCst);
         let steps = 25;
-        let step_delay = Duration::from_millis((transition_duration.as_millis() as u64 / steps as u64).max(1));
+        let step_delay =
+            Duration::from_millis((transition_duration.as_millis() as u64 / steps as u64).max(1));
         let (full_w, full_h_raw) = *self.window_geometry.lock();
         let full_h = full_h_raw - self.reserved_header_height;
         let full_y = self.reserved_header_height;
@@ -563,8 +578,14 @@ impl TourController {
             *tile.resting_rect.lock() = *rect;
             if is_expanded && i == active {
                 let _ = tile.webview.set_bounds(Rect {
-                    position: tauri::Position::Logical(LogicalPosition::new(0.0, self.reserved_header_height)),
-                    size: tauri::Size::Logical(LogicalSize::new(win_w, win_h - self.reserved_header_height)),
+                    position: tauri::Position::Logical(LogicalPosition::new(
+                        0.0,
+                        self.reserved_header_height,
+                    )),
+                    size: tauri::Size::Logical(LogicalSize::new(
+                        win_w,
+                        win_h - self.reserved_header_height,
+                    )),
                 });
             } else {
                 let _ = tile.webview.set_bounds(Rect {
@@ -636,10 +657,8 @@ pub fn start_tour_loop(
                                 });
                             }
                         }
-                        TourStateName::PreparingNext => {
-                            if elapsed >= target_duration {
-                                controller.on_preparing_timeout(gen);
-                            }
+                        TourStateName::PreparingNext if elapsed >= target_duration => {
+                            controller.on_preparing_timeout(gen);
                         }
                         _ => {}
                     }
@@ -699,7 +718,9 @@ pub fn minimize_current(controller: State<Arc<TourController>>) -> Result<(), St
 }
 
 #[tauri::command]
-pub fn get_tour_status(controller: State<Arc<TourController>>) -> Result<TourStatusPayload, String> {
+pub fn get_tour_status(
+    controller: State<Arc<TourController>>,
+) -> Result<TourStatusPayload, String> {
     let titles: Vec<String> = controller.tiles.iter().map(|t| t.title.clone()).collect();
     Ok(controller.machine.get_status_payload(&titles))
 }
@@ -755,13 +776,19 @@ mod tests {
         let (target, candidate, gen, _duration) = machine.begin_minimizing(0);
         assert_eq!(target, 0);
         assert_eq!(candidate, 1);
-        assert_eq!(machine.state.lock().current_state, TourStateName::Minimizing);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::Minimizing
+        );
         assert_eq!(machine.state.lock().pending_reload, Some((1, gen)));
         assert!(!machine.state.lock().candidate_reload_finished);
 
         // 2. Candidate 1 finishes loading FAST while minimization animation is still running!
         machine.on_page_load_finished(1, gen);
-        assert!(machine.state.lock().candidate_reload_finished, "Must record readiness during Minimizing");
+        assert!(
+            machine.state.lock().candidate_reload_finished,
+            "Must record readiness during Minimizing"
+        );
 
         // 3. Minimization animation completes and calls finish_minimizing
         let next_state = machine.finish_minimizing();
@@ -784,7 +811,10 @@ mod tests {
         // 2. Minimization completes, but candidate 1 has NOT finished loading
         let next_state = machine.finish_minimizing();
         assert_eq!(next_state, TourStateName::PreparingNext);
-        assert_eq!(machine.state.lock().current_state, TourStateName::PreparingNext);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::PreparingNext
+        );
         assert_eq!(machine.state.lock().candidate_index, 1);
 
         // 3. 2.5s timeout expires with matching generation token
@@ -805,7 +835,10 @@ mod tests {
         // Tour targets tile 1 for the first time with Generation G1
         let (_, _, g1, _) = machine.begin_minimizing(0);
         let _ = machine.finish_minimizing();
-        assert_eq!(machine.state.lock().current_state, TourStateName::PreparingNext);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::PreparingNext
+        );
 
         // Timeout triggers on G1, advancing past tile 1
         let _ = machine.on_preparing_timeout(g1);
@@ -815,20 +848,32 @@ mod tests {
         let (_, _, g2, _) = machine.begin_minimizing(0);
         assert!(g2 > g1);
         let _ = machine.finish_minimizing();
-        assert_eq!(machine.state.lock().current_state, TourStateName::PreparingNext);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::PreparingNext
+        );
         assert_eq!(machine.state.lock().pending_reload, Some((1, g2)));
 
         // An extremely delayed Finished event from the SAME INDEX (tile 1) with OLD GENERATION G1 arrives!
         let accepted = machine.on_page_load_finished(1, g1);
-        assert!(!accepted, "Stale Finished event from older generation must be discarded even for the same index");
+        assert!(
+            !accepted,
+            "Stale Finished event from older generation must be discarded even for the same index"
+        );
 
         // Current state remains PreparingNext waiting for the legitimate G2 event!
-        assert_eq!(machine.state.lock().current_state, TourStateName::PreparingNext);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::PreparingNext
+        );
         assert_eq!(machine.state.lock().pending_reload, Some((1, g2)));
 
         // Real G2 Finished event arrives
         let real_accepted = machine.on_page_load_finished(1, g2);
-        assert!(real_accepted, "Legitimate Finished event with matching generation must be accepted");
+        assert!(
+            real_accepted,
+            "Legitimate Finished event with matching generation must be accepted"
+        );
         assert_eq!(machine.state.lock().current_state, TourStateName::GridView);
         assert_eq!(machine.state.lock().pending_reload, None);
     }
@@ -840,13 +885,19 @@ mod tests {
 
         // 1. Begin maximizing tile 0
         machine.begin_maximizing(0);
-        assert_eq!(machine.state.lock().current_state, TourStateName::Maximizing);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::Maximizing
+        );
 
         // 2. User presses Space / calls pause() mid-animation!
         machine.pause();
         assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
         assert!(machine.state.lock().is_paused);
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::Maximizing);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::Maximizing
+        );
 
         // Wait 50ms while paused
         std::thread::sleep(Duration::from_millis(50));
@@ -858,13 +909,19 @@ mod tests {
         assert_eq!(res, TourStateName::Paused);
         assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
         assert!(machine.state.lock().is_paused);
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::MaximizedSingleSite);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::MaximizedSingleSite
+        );
         // INVARIANT: paused_elapsed is reset to ZERO so resume does not backdate hold!
         assert_eq!(machine.state.lock().paused_elapsed, Duration::ZERO);
 
         // 4. User resumes later
         machine.resume();
-        assert_eq!(machine.state.lock().current_state, TourStateName::MaximizedSingleSite);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::MaximizedSingleSite
+        );
         assert!(!machine.state.lock().is_paused);
         let elapsed = machine.state.lock().state_start.elapsed();
         // Elapsed should be fresh (~0ms), not containing the 50ms animation pause!
@@ -884,7 +941,10 @@ mod tests {
         // 2. User pauses while waiting in PreparingNext
         machine.pause();
         assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::PreparingNext);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::PreparingNext
+        );
         assert_eq!(machine.state.lock().pending_reload, Some((1, gen)));
 
         // 3. Candidate 1 finishes loading while user is paused
@@ -893,7 +953,10 @@ mod tests {
 
         // INVARIANT: Remains Paused, but destination is updated to GridView and pending cleared!
         assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::GridView);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::GridView
+        );
         assert_eq!(machine.state.lock().pending_reload, None);
         assert_eq!(machine.state.lock().candidate_index, 1);
 
@@ -913,7 +976,10 @@ mod tests {
 
         // 2. User pauses in PreparingNext
         machine.pause();
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::PreparingNext);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::PreparingNext
+        );
 
         // 3. Timeout triggers on generation token while paused
         let advanced = machine.on_preparing_timeout(gen);
@@ -921,7 +987,10 @@ mod tests {
 
         // INVARIANT: Remains Paused, destination updated to GridView, candidate advanced to 2!
         assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::GridView);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::GridView
+        );
         assert_eq!(machine.state.lock().candidate_index, 2);
         assert_eq!(machine.state.lock().pending_reload, None);
 
@@ -935,15 +1004,24 @@ mod tests {
         machine.start();
         machine.begin_maximizing(0);
         machine.finish_maximizing();
-        assert_eq!(machine.state.lock().current_state, TourStateName::MaximizedSingleSite);
+        assert_eq!(
+            machine.state.lock().current_state,
+            TourStateName::MaximizedSingleSite
+        );
         assert!(machine.state.lock().is_visually_expanded());
 
         // Pause while maximized
         machine.pause();
         assert_eq!(machine.state.lock().current_state, TourStateName::Paused);
-        assert_eq!(machine.state.lock().previous_state_before_pause, TourStateName::MaximizedSingleSite);
+        assert_eq!(
+            machine.state.lock().previous_state_before_pause,
+            TourStateName::MaximizedSingleSite
+        );
 
         // Production method call: verify state machine considers it visually expanded
-        assert!(machine.state.lock().is_visually_expanded(), "Must call production is_visually_expanded() and verify true");
+        assert!(
+            machine.state.lock().is_visually_expanded(),
+            "Must call production is_visually_expanded() and verify true"
+        );
     }
 }

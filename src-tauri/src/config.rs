@@ -1,7 +1,7 @@
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::State;
 
@@ -293,20 +293,39 @@ pub fn find_portable_config_path(exe_path: &Path) -> Option<PathBuf> {
 
     None
 }
-
-/// Resolves configuration according to the strict 4-level precedence rule:
-/// 1. CLI flag (--config) or KIOSK_CONFIG env var (read-only)
-/// 2. Portable config adjacent to bundle/exe (read-only)
-/// 3. User Application Support directory (writable)
-/// 4. Compiled defaults
 /// System safety ceiling for resident webviews.
 pub const MAX_ALLOWED_RESIDENT_WEBVIEWS: usize = 16;
+
+/// Parses a hex color string (e.g. "#0d0d0d" or "#0d0d0dff") into RGBA components.
+pub fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8, u8)> {
+    let clean = hex.trim().strip_prefix('#').unwrap_or(hex.trim());
+    if clean.len() == 6 {
+        let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
+        Some((r, g, b, 255))
+    } else if clean.len() == 8 {
+        let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
+        let a = u8::from_str_radix(&clean[6..8], 16).ok()?;
+        Some((r, g, b, a))
+    } else {
+        None
+    }
+}
 
 /// Validates kiosk configuration against runtime safety invariants:
 /// 1. max_resident_webviews <= 16
 /// 2. endpoints.len() <= max_resident_webviews
 /// 3. endpoints.len() >= 1
 pub fn validate_kiosk_config(config: &KioskConfig) -> Result<(), String> {
+    if parse_hex_color(&config.window.background_color).is_none() {
+        return Err(format!(
+            "Configuration error: window.background_color '{}' is not a valid hex color (#RRGGBB or #RRGGBBAA).",
+            config.window.background_color
+        ));
+    }
     if config.limits.max_resident_webviews > MAX_ALLOWED_RESIDENT_WEBVIEWS {
         return Err(format!(
             "Configuration error: max_resident_webviews ({}) exceeds system safety ceiling ({}).",
@@ -322,9 +341,38 @@ pub fn validate_kiosk_config(config: &KioskConfig) -> Result<(), String> {
         return Err("Configuration error: at least one endpoint must be configured.".into());
     }
 
+    for (idx, ep) in config.endpoints.iter().enumerate() {
+        if ep.title.trim().is_empty() {
+            return Err(format!(
+                "Configuration error: endpoint #{} has an empty title.",
+                idx + 1
+            ));
+        }
+        match url::Url::parse(&ep.url) {
+            Ok(parsed) => {
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err(format!(
+                        "Configuration error: endpoint '{}' URL '{}' must use http or https scheme.",
+                        ep.title, ep.url
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Configuration error: endpoint '{}' has an invalid URL '{}': {}.",
+                    ep.title, ep.url, e
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
-
+/// Resolves configuration according to the strict 4-level precedence rule:
+/// 1. CLI flag (--config) or KIOSK_CONFIG env var (read-only)
+/// 2. Portable config adjacent to bundle/exe (read-only)
+/// 3. User Application Support directory (writable)
+/// 4. Compiled defaults
 pub fn resolve_configuration(
     cli_arg: Option<&Path>,
     exe_path: Option<&Path>,
@@ -332,69 +380,97 @@ pub fn resolve_configuration(
 ) -> Result<ConfigMetaResponse, String> {
     // Level 1: CLI / Environment override
     if let Some(p) = cli_arg {
-        if p.is_file() {
-            let content = fs::read_to_string(p)
-                .map_err(|e| format!("Failed to read CLI config at '{}': {}", p.display(), e))?;
-            let config: KioskConfig = serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse CLI config at '{}': {}", p.display(), e))?;
-            validate_kiosk_config(&config)?;
-            return Ok(ConfigMetaResponse {
-                config,
-                source: ConfigSource::Cli,
-                is_readonly: true,
-                resolved_path: p.to_string_lossy().to_string(),
-            });
+        if !p.is_file() {
+            return Err(format!(
+                "CLI configuration file '{}' does not exist or is not a file.",
+                p.display()
+            ));
         }
+        let content = fs::read_to_string(p)
+            .map_err(|e| format!("Failed to read CLI config at '{}': {}", p.display(), e))?;
+        let config: KioskConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse CLI config at '{}': {}", p.display(), e))?;
+        validate_kiosk_config(&config)?;
+        return Ok(ConfigMetaResponse {
+            config,
+            source: ConfigSource::Cli,
+            is_readonly: true,
+            resolved_path: p.to_string_lossy().to_string(),
+        });
     }
 
     if let Ok(env_path) = std::env::var("KIOSK_CONFIG") {
         let p = PathBuf::from(env_path);
-        if p.is_file() {
-            let content = fs::read_to_string(&p)
-                .map_err(|e| format!("Failed to read KIOSK_CONFIG at '{}': {}", p.display(), e))?;
-            let config: KioskConfig = serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse KIOSK_CONFIG at '{}': {}", p.display(), e))?;
-            validate_kiosk_config(&config)?;
-            return Ok(ConfigMetaResponse {
-                config,
-                source: ConfigSource::Cli,
-                is_readonly: true,
-                resolved_path: p.to_string_lossy().to_string(),
-            });
+        if !p.is_file() {
+            return Err(format!(
+                "KIOSK_CONFIG path '{}' does not exist or is not a file.",
+                p.display()
+            ));
         }
+        let content = fs::read_to_string(&p)
+            .map_err(|e| format!("Failed to read KIOSK_CONFIG at '{}': {}", p.display(), e))?;
+        let config: KioskConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse KIOSK_CONFIG at '{}': {}", p.display(), e))?;
+        validate_kiosk_config(&config)?;
+        return Ok(ConfigMetaResponse {
+            config,
+            source: ConfigSource::Cli,
+            is_readonly: true,
+            resolved_path: p.to_string_lossy().to_string(),
+        });
     }
 
     // Level 2: Portable config
     if let Some(exe) = exe_path {
         if let Some(port_path) = find_portable_config_path(exe) {
-            if let Ok(content) = fs::read_to_string(&port_path) {
-                let config: KioskConfig = serde_json::from_str(&content)
-                    .map_err(|e| format!("Failed to parse portable config at '{}': {}", port_path.display(), e))?;
-                validate_kiosk_config(&config)?;
-                return Ok(ConfigMetaResponse {
-                    config,
-                    source: ConfigSource::Portable,
-                    is_readonly: true,
-                    resolved_path: port_path.to_string_lossy().to_string(),
-                });
-            }
+            let content = fs::read_to_string(&port_path).map_err(|e| {
+                format!(
+                    "Failed to read portable config at '{}': {}",
+                    port_path.display(),
+                    e
+                )
+            })?;
+            let config: KioskConfig = serde_json::from_str(&content).map_err(|e| {
+                format!(
+                    "Failed to parse portable config at '{}': {}",
+                    port_path.display(),
+                    e
+                )
+            })?;
+            validate_kiosk_config(&config)?;
+            return Ok(ConfigMetaResponse {
+                config,
+                source: ConfigSource::Portable,
+                is_readonly: true,
+                resolved_path: port_path.to_string_lossy().to_string(),
+            });
         }
     }
 
     // Level 3: User AppData directory
     let appdata_file = app_data_dir.join("config.json");
     if appdata_file.is_file() {
-        if let Ok(content) = fs::read_to_string(&appdata_file) {
-            let config: KioskConfig = serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse AppData config at '{}': {}", appdata_file.display(), e))?;
-            validate_kiosk_config(&config)?;
-            return Ok(ConfigMetaResponse {
-                config,
-                source: ConfigSource::AppData,
-                is_readonly: false,
-                resolved_path: appdata_file.to_string_lossy().to_string(),
-            });
-        }
+        let content = fs::read_to_string(&appdata_file).map_err(|e| {
+            format!(
+                "Failed to read AppData config at '{}': {}",
+                appdata_file.display(),
+                e
+            )
+        })?;
+        let config: KioskConfig = serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "Failed to parse AppData config at '{}': {}",
+                appdata_file.display(),
+                e
+            )
+        })?;
+        validate_kiosk_config(&config)?;
+        return Ok(ConfigMetaResponse {
+            config,
+            source: ConfigSource::AppData,
+            is_readonly: false,
+            resolved_path: appdata_file.to_string_lossy().to_string(),
+        });
     }
 
     // Level 4: Compiled defaults
@@ -407,7 +483,6 @@ pub fn resolve_configuration(
         resolved_path: "<compiled defaults>".into(),
     })
 }
-
 /// Atomically persists configuration to destination path.
 pub fn write_config_atomic(path: &Path, config: &KioskConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -509,7 +584,11 @@ mod tests {
 
     impl TempDirGuard {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("ambient_kiosk_test_{}_{}", name, std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "ambient_kiosk_test_{}_{}",
+                name,
+                std::process::id()
+            ));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             Self { path }
@@ -533,7 +612,8 @@ mod tests {
         let mut appdata_cfg = KioskConfig::default();
         appdata_cfg.timing.grid_view_duration_ms = 33333;
         let mut f = File::create(&appdata_file).unwrap();
-        f.write_all(serde_json::to_string(&appdata_cfg).unwrap().as_bytes()).unwrap();
+        f.write_all(serde_json::to_string(&appdata_cfg).unwrap().as_bytes())
+            .unwrap();
 
         // Level 2: Portable
         let exe_dir = temp.path.join("exe_dir");
@@ -543,14 +623,16 @@ mod tests {
         let mut port_cfg = KioskConfig::default();
         port_cfg.timing.grid_view_duration_ms = 44444;
         let mut f = File::create(&portable_file).unwrap();
-        f.write_all(serde_json::to_string(&port_cfg).unwrap().as_bytes()).unwrap();
+        f.write_all(serde_json::to_string(&port_cfg).unwrap().as_bytes())
+            .unwrap();
 
         // Level 1: CLI
         let cli_file = temp.path.join("cli_override.json");
         let mut cli_cfg = KioskConfig::default();
         cli_cfg.timing.grid_view_duration_ms = 55555;
         let mut f = File::create(&cli_file).unwrap();
-        f.write_all(serde_json::to_string(&cli_cfg).unwrap().as_bytes()).unwrap();
+        f.write_all(serde_json::to_string(&cli_cfg).unwrap().as_bytes())
+            .unwrap();
 
         // 1. All present: CLI must win
         let meta = resolve_configuration(Some(&cli_file), Some(&exe_path), &appdata_dir).unwrap();
@@ -582,7 +664,11 @@ mod tests {
     #[test]
     fn test_parse_cli_config_arg() {
         assert_eq!(
-            parse_cli_config_arg(vec!["app".into(), "--config".into(), "/tmp/cfg.json".into()]),
+            parse_cli_config_arg(vec![
+                "app".into(),
+                "--config".into(),
+                "/tmp/cfg.json".into()
+            ]),
             Some(PathBuf::from("/tmp/cfg.json"))
         );
         assert_eq!(
@@ -653,10 +739,7 @@ mod tests {
         new_config.limits.max_resident_webviews = 2; // 5 endpoints > 2 limit
 
         let err = validate_and_save_config(&state, new_config).unwrap_err();
-        assert_eq!(
-            err,
-            "Endpoint count exceeds max_resident_webviews limit."
-        );
+        assert_eq!(err, "Endpoint count exceeds max_resident_webviews limit.");
     }
 
     #[test]
@@ -681,7 +764,10 @@ mod tests {
 
         // Verify file was written to disk atomically
         let written_file = appdata_dir.join("config.json");
-        assert!(written_file.is_file(), "config.json must exist in appdata dir");
+        assert!(
+            written_file.is_file(),
+            "config.json must exist in appdata dir"
+        );
         let content = fs::read_to_string(&written_file).unwrap();
         let parsed: KioskConfig = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.timing.grid_view_duration_ms, 77777);
@@ -703,10 +789,17 @@ mod tests {
         let mut invalid_limit_cfg = KioskConfig::default();
         invalid_limit_cfg.limits.max_resident_webviews = 20;
         let limit_file = temp.path.join("invalid_limit.json");
-        fs::write(&limit_file, serde_json::to_string(&invalid_limit_cfg).unwrap()).unwrap();
+        fs::write(
+            &limit_file,
+            serde_json::to_string(&invalid_limit_cfg).unwrap(),
+        )
+        .unwrap();
 
         let res = resolve_configuration(Some(&limit_file), None, &appdata_dir);
-        assert!(res.is_err(), "Must reject loaded config with max_resident_webviews > 16");
+        assert!(
+            res.is_err(),
+            "Must reject loaded config with max_resident_webviews > 16"
+        );
         let err_msg = res.unwrap_err();
         assert!(err_msg.contains("exceeds system safety ceiling (16)"));
 
@@ -714,22 +807,92 @@ mod tests {
         let mut invalid_endpoints_cfg = KioskConfig::default();
         invalid_endpoints_cfg.limits.max_resident_webviews = 3; // 5 endpoints > 3
         let endpoints_file = temp.path.join("invalid_endpoints.json");
-        fs::write(&endpoints_file, serde_json::to_string(&invalid_endpoints_cfg).unwrap()).unwrap();
+        fs::write(
+            &endpoints_file,
+            serde_json::to_string(&invalid_endpoints_cfg).unwrap(),
+        )
+        .unwrap();
 
         let res = resolve_configuration(Some(&endpoints_file), None, &appdata_dir);
-        assert!(res.is_err(), "Must reject loaded config with endpoints > limit");
+        assert!(
+            res.is_err(),
+            "Must reject loaded config with endpoints > limit"
+        );
         let err_msg = res.unwrap_err();
-        assert_eq!(err_msg, "Endpoint count exceeds max_resident_webviews limit.");
+        assert_eq!(
+            err_msg,
+            "Endpoint count exceeds max_resident_webviews limit."
+        );
 
         // 3. Loaded config with zero endpoints
         let mut empty_endpoints_cfg = KioskConfig::default();
         empty_endpoints_cfg.endpoints.clear();
         let empty_file = temp.path.join("empty_endpoints.json");
-        fs::write(&empty_file, serde_json::to_string(&empty_endpoints_cfg).unwrap()).unwrap();
+        fs::write(
+            &empty_file,
+            serde_json::to_string(&empty_endpoints_cfg).unwrap(),
+        )
+        .unwrap();
 
         let res = resolve_configuration(Some(&empty_file), None, &appdata_dir);
-        assert!(res.is_err(), "Must reject loaded config with zero endpoints");
+        assert!(
+            res.is_err(),
+            "Must reject loaded config with zero endpoints"
+        );
         let err_msg = res.unwrap_err();
         assert!(err_msg.contains("at least one endpoint must be configured"));
+    }
+
+    #[test]
+    fn test_endpoint_validation_and_error_propagation() {
+        let temp = TempDirGuard::new("endpoint_validation");
+        let appdata_dir = temp.path.join("appdata");
+        fs::create_dir_all(&appdata_dir).unwrap();
+
+        // 1. Empty title validation
+        let mut bad_title_cfg = KioskConfig::default();
+        bad_title_cfg.endpoints[0].title = "   ".into();
+        let err = validate_kiosk_config(&bad_title_cfg).unwrap_err();
+        assert!(err.contains("has an empty title"));
+
+        // 2. Invalid URL scheme validation (file:, javascript:, etc.)
+        let mut bad_scheme_cfg = KioskConfig::default();
+        bad_scheme_cfg.endpoints[0].url = "file:///etc/passwd".into();
+        let err = validate_kiosk_config(&bad_scheme_cfg).unwrap_err();
+        assert!(err.contains("must use http or https scheme"));
+
+        let mut unparseable_cfg = KioskConfig::default();
+        unparseable_cfg.endpoints[0].url = "not a valid url".into();
+        let err = validate_kiosk_config(&unparseable_cfg).unwrap_err();
+        assert!(err.contains("has an invalid URL"));
+
+        // 3. Explicit CLI config missing file error propagation (no silent fallthrough)
+        let nonexistent_cli = temp.path.join("nonexistent_cli.json");
+        let res = resolve_configuration(Some(&nonexistent_cli), None, &appdata_dir);
+        assert!(res.is_err(), "Must return Err for nonexistent CLI path");
+        assert!(res.unwrap_err().contains("does not exist or is not a file"));
+
+        // 4. Corrupt JSON error propagation
+        let corrupt_file = temp.path.join("corrupt.json");
+        fs::write(&corrupt_file, "{ invalid json").unwrap();
+        let res = resolve_configuration(Some(&corrupt_file), None, &appdata_dir);
+        assert!(res.is_err(), "Must return Err for corrupt JSON");
+        assert!(res.unwrap_err().contains("Failed to parse CLI config"));
+    }
+
+    #[test]
+    fn test_parse_hex_color_and_background_color_validation() {
+        assert_eq!(parse_hex_color("#0d0d0d"), Some((13, 13, 13, 255)));
+        assert_eq!(parse_hex_color("0d0d0d"), Some((13, 13, 13, 255)));
+        assert_eq!(parse_hex_color("#11223344"), Some((17, 34, 51, 68)));
+
+        assert_eq!(parse_hex_color(""), None);
+        assert_eq!(parse_hex_color("not-a-color"), None);
+        assert_eq!(parse_hex_color("#123"), None);
+
+        let mut bad_color_cfg = KioskConfig::default();
+        bad_color_cfg.window.background_color = "not-a-color".into();
+        let err = validate_kiosk_config(&bad_color_cfg).unwrap_err();
+        assert!(err.contains("not a valid hex color"));
     }
 }

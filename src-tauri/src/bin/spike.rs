@@ -51,7 +51,9 @@ async fn resolve_with_adguard_plain_udp(host: &str) -> Option<IpAddr> {
 
     // Construct DNS A query
     let mut packet = Vec::with_capacity(512);
-    packet.extend_from_slice(&[0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    packet.extend_from_slice(&[
+        0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
     for label in host.split('.') {
         if label.is_empty() || label.len() > 63 {
             return None;
@@ -68,7 +70,10 @@ async fn resolve_with_adguard_plain_udp(host: &str) -> Option<IpAddr> {
     socket.send(&packet).await.ok()?;
 
     let mut buf = [0u8; 512];
-    let n = tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut buf)).await.ok()?.ok()?;
+    let n = tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
     let resp = &buf[..n];
     if resp.len() < 12 {
         return None;
@@ -107,7 +112,8 @@ async fn resolve_with_adguard_plain_udp(host: &str) -> Option<IpAddr> {
         let rdlength = u16::from_be_bytes([resp[idx + 8], resp[idx + 9]]) as usize;
         idx += 10;
         if rtype == 1 && rdlength == 4 && idx + 4 <= resp.len() {
-            let ip = std::net::Ipv4Addr::new(resp[idx], resp[idx + 1], resp[idx + 2], resp[idx + 3]);
+            let ip =
+                std::net::Ipv4Addr::new(resp[idx], resp[idx + 1], resp[idx + 2], resp[idx + 3]);
             return Some(IpAddr::V4(ip));
         }
         idx += rdlength;
@@ -139,9 +145,13 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
 
             // Controllable stall simulation route for testing timeout
             if first_line.contains("stall.test") || first_line.contains("/stall") {
-                println!("[AdGuard-Proxy] [STALL ROUTE] Holding connection intentionally for 6.0s...");
+                println!(
+                    "[AdGuard-Proxy] [STALL ROUTE] Holding connection intentionally for 6.0s..."
+                );
                 tokio::time::sleep(Duration::from_millis(6000)).await;
-                let _ = client.write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n").await;
+                let _ = client
+                    .write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
+                    .await;
                 return;
             }
 
@@ -161,7 +171,10 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
                                 let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
                                 return;
                             }
-                            println!("[AdGuard-Proxy] [RESOLVED] '{}' -> {} via AdGuard DoH", host, ip);
+                            println!(
+                                "[AdGuard-Proxy] [RESOLVED] '{}' -> {} via AdGuard DoH",
+                                host, ip
+                            );
                             ip
                         }
                         None => {
@@ -170,7 +183,9 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
                                 Some(ip) => {
                                     if ip.is_unspecified() {
                                         println!("[AdGuard-Proxy] [BLOCKED] Domain '{}' resolved to 0.0.0.0 by AdGuard plain DNS", host);
-                                        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
+                                        let _ = client
+                                            .write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                                            .await;
                                         return;
                                     }
                                     println!("[AdGuard-Proxy] [RESOLVED] '{}' -> {} via AdGuard plain DNS", host, ip);
@@ -178,7 +193,8 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
                                 }
                                 None => {
                                     println!("[AdGuard-Proxy] [RESOLUTION-FAILED] Domain '{}' unresolvable via AdGuard DNS", host);
-                                    let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                                    let _ =
+                                        client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
                                     return;
                                 }
                             }
@@ -189,12 +205,20 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
                     let connect_addr = SocketAddr::new(target_ip, port);
                     match TcpStream::connect(connect_addr).await {
                         Ok(mut upstream) => {
-                            if client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.is_ok() {
-                                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                            if client
+                                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                                .await
+                                .is_ok()
+                            {
+                                let _ =
+                                    tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
                             }
                         }
                         Err(e) => {
-                            println!("[AdGuard-Proxy] Connection to {} ({}) failed: {}", host, connect_addr, e);
+                            println!(
+                                "[AdGuard-Proxy] Connection to {} ({}) failed: {}",
+                                host, connect_addr, e
+                            );
                             let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
                         }
                     }
@@ -202,15 +226,21 @@ async fn run_adguard_proxy(listener: TcpListener, ready: Arc<AtomicBool>) {
             } else if first_line.starts_with("GET ") {
                 // Non-CONNECT HTTP proxying fallback
                 let parts: Vec<&str> = first_line.split_whitespace().collect();
-                if parts.len() >= 2 && (parts[1].contains("stall.test") || parts[1].contains("/stall")) {
+                if parts.len() >= 2
+                    && (parts[1].contains("stall.test") || parts[1].contains("/stall"))
+                {
                     println!("[AdGuard-Proxy] [STALL ROUTE] Holding plain HTTP connection intentionally for 6.0s...");
                     tokio::time::sleep(Duration::from_millis(6000)).await;
-                    let _ = client.write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n").await;
+                    let _ = client
+                        .write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
+                        .await;
                 } else {
                     let _ = client.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK").await;
                 }
             } else {
-                let _ = client.write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n").await;
+                let _ = client
+                    .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                    .await;
             }
         });
     }
@@ -230,7 +260,9 @@ fn main() {
     // 1. Initialize Tokio runtime for proxy and DNS
     let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
     let (proxy_port, ready_flag) = rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("Failed to bind proxy");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind proxy");
         let port = listener.local_addr().unwrap().port();
         let ready = Arc::new(AtomicBool::new(false));
         tokio::spawn(run_adguard_proxy(listener, ready.clone()));
@@ -240,7 +272,10 @@ fn main() {
     while !ready_flag.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(10));
     }
-    println!("[Spike] AdGuard DoH loopback proxy ready on port {}", proxy_port);
+    println!(
+        "[Spike] AdGuard DoH loopback proxy ready on port {}",
+        proxy_port
+    );
 
     let proxy_url_str = format!("http://127.0.0.1:{}", proxy_port);
     let parsed_proxy_url = Url::parse(&proxy_url_str).expect("Valid proxy url");

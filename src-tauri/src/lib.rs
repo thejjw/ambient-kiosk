@@ -4,7 +4,7 @@ pub mod proxy;
 pub mod tour;
 pub mod webview_manager;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{Emitter, LogicalSize, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -121,26 +121,22 @@ pub fn run() {
                         });
                     }
                 }
-                tauri::WindowEvent::Moved(pos) => {
-                    if label == "main" {
-                        if let Some(hud) = app_handle.get_window("hud-overlay") {
-                            let _ = hud.set_position(*pos);
-                        }
+                tauri::WindowEvent::Moved(pos) if label == "main" => {
+                    if let Some(hud) = app_handle.get_window("hud-overlay") {
+                        let _ = hud.set_position(*pos);
                     }
                 }
-                tauri::WindowEvent::Resized(size) => {
-                    if label == "main" {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        let logical_w = size.width as f64 / scale;
-                        let logical_h = size.height as f64 / scale;
+                tauri::WindowEvent::Resized(size) if label == "main" => {
+                    let scale = window.scale_factor().unwrap_or(1.0);
+                    let logical_w = size.width as f64 / scale;
+                    let logical_h = size.height as f64 / scale;
 
-                        if let Some(hud) = app_handle.get_window("hud-overlay") {
-                            let _ = hud.set_size(LogicalSize::new(logical_w, 48.0));
-                        }
+                    if let Some(hud) = app_handle.get_window("hud-overlay") {
+                        let _ = hud.set_size(LogicalSize::new(logical_w, 48.0));
+                    }
 
-                        if let Some(ctrl) = app_handle.try_state::<Arc<tour::TourController>>() {
-                            ctrl.inner().handle_window_resize(logical_w, logical_h);
-                        }
+                    if let Some(ctrl) = app_handle.try_state::<Arc<tour::TourController>>() {
+                        ctrl.inner().handle_window_resize(logical_w, logical_h);
                     }
                 }
                 _ => {}
@@ -178,8 +174,17 @@ pub fn run() {
 
             // 2. Compute full-bleed layout for main coordinator window
             let window = app.get_window("main").expect("Window 'main' must exist");
+            if cfg.window.fullscreen {
+                let _ = window.set_fullscreen(true);
+            }
+            let _ = window.set_decorations(cfg.window.decorations);
+            if let Some((r, g, b, a)) = config::parse_hex_color(&cfg.window.background_color) {
+                let _ = window.set_background_color(Some(tauri::window::Color(r, g, b, a)));
+            }
             let (win_width, win_height) = {
-                let size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(1920, 1080));
+                let size = window
+                    .inner_size()
+                    .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
                 let scale = window.scale_factor().unwrap_or(1.0);
                 (size.width as f64 / scale, size.height as f64 / scale)
             };
@@ -220,7 +225,8 @@ pub fn run() {
             // 5. Setup global shortcut plugin with controller integration
             let ctrl_for_shortcuts = tour_controller.clone();
             let app_for_shortcuts = app.handle().clone();
-
+            let (hud_cmd_tx, mut hud_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+            let hud_cmd_tx_sc = hud_cmd_tx.clone();
             let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
@@ -247,10 +253,7 @@ pub fn run() {
                         } else if shortcut == &esc_sc {
                             ctrl_for_shortcuts.minimize_current();
                         } else if shortcut == &h_sc {
-                            if let Some(hud) = app_for_shortcuts.get_window("hud-overlay") {
-                                let _ = hud.set_ignore_cursor_events(false);
-                                let _ = app_for_shortcuts.emit_to("hud-overlay", "hud-visibility", true);
-                            }
+                            let _ = hud_cmd_tx_sc.send(true);
                         }
                     }
                 })
@@ -278,15 +281,17 @@ pub fn run() {
                             }
                         }
                         if reg_failed {
-                            let cleaned = unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await;
+                            let cleaned =
+                                unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await;
                             currently_registered = !cleaned;
                         } else {
                             currently_registered = true;
                         }
-                    } else if !desired && currently_registered {
-                        if unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await {
-                            currently_registered = false;
-                        }
+                    } else if !desired
+                        && currently_registered
+                        && unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await
+                    {
+                        currently_registered = false;
                     }
                 }
             });
@@ -308,12 +313,12 @@ pub fn run() {
                 .unwrap_or(false);
             let initial_focus = main_focused || hud_focused;
             let _ = shortcut_tx.send(initial_focus);
-            // 7. Native cursor tracking poller toggling ignore_cursor_events
+            // 7. Native cursor tracking poller owning interactive state and leave_timer
             let cursor_app = app.handle().clone();
-            let is_interactive = Arc::new(AtomicBool::new(false));
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
                 let mut leave_timer = std::time::Instant::now();
+                let mut is_interactive = false;
 
                 loop {
                     interval.tick().await;
@@ -327,6 +332,16 @@ pub fn run() {
                         None => continue,
                     };
 
+                    // Handle external toggle commands (e.g. from H hotkey)
+                    while hud_cmd_rx.try_recv().is_ok() {
+                        is_interactive = !is_interactive;
+                        let _ = hud_win.set_ignore_cursor_events(!is_interactive);
+                        let _ = cursor_app.emit_to("hud-overlay", "hud-visibility", is_interactive);
+                        if is_interactive {
+                            leave_timer = std::time::Instant::now();
+                        }
+                    }
+
                     if let Ok(cursor_pos) = main_win.cursor_position() {
                         if let Ok(win_pos) = main_win.outer_position() {
                             if let Ok(win_size) = main_win.inner_size() {
@@ -337,24 +352,36 @@ pub fn run() {
                                 let wy = win_pos.y as f64;
                                 let ww = win_size.width as f64;
 
-                                let in_top_edge = cx >= wx && cx <= wx + ww && cy >= wy && cy <= wy + (20.0 * scale);
-                                let in_hud_band = cx >= wx && cx <= wx + ww && cy >= wy && cy <= wy + (52.0 * scale);
+                                let in_top_edge = cx >= wx
+                                    && cx <= wx + ww
+                                    && cy >= wy
+                                    && cy <= wy + (20.0 * scale);
+                                let in_hud_band = cx >= wx
+                                    && cx <= wx + ww
+                                    && cy >= wy
+                                    && cy <= wy + (52.0 * scale);
 
                                 if in_top_edge {
-                                    if !is_interactive.load(Ordering::SeqCst) {
-                                        let _ = cursor_app.emit_to("hud-overlay", "hud-visibility", true);
+                                    if !is_interactive {
+                                        let _ = cursor_app.emit_to(
+                                            "hud-overlay",
+                                            "hud-visibility",
+                                            true,
+                                        );
                                         let _ = hud_win.set_ignore_cursor_events(false);
-                                        is_interactive.store(true, Ordering::SeqCst);
+                                        is_interactive = true;
                                     }
                                     leave_timer = std::time::Instant::now();
-                                } else if in_hud_band && is_interactive.load(Ordering::SeqCst) {
+                                } else if in_hud_band && is_interactive {
                                     leave_timer = std::time::Instant::now();
-                                } else if is_interactive.load(Ordering::SeqCst)
-                                    && leave_timer.elapsed() >= std::time::Duration::from_millis(1500)
+                                } else if is_interactive
+                                    && leave_timer.elapsed()
+                                        >= std::time::Duration::from_millis(1500)
                                 {
-                                    let _ = cursor_app.emit_to("hud-overlay", "hud-visibility", false);
+                                    let _ =
+                                        cursor_app.emit_to("hud-overlay", "hud-visibility", false);
                                     let _ = hud_win.set_ignore_cursor_events(true);
-                                    is_interactive.store(false, Ordering::SeqCst);
+                                    is_interactive = false;
                                 }
                             }
                         }

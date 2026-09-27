@@ -9,7 +9,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 pub fn build_dns_query_packet(host: &str) -> Option<Vec<u8>> {
     let mut packet = Vec::with_capacity(512);
     // Header: ID=0xbeef, QR=0, Opcode=0, RD=1, QDCOUNT=1
-    packet.extend_from_slice(&[0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    packet.extend_from_slice(&[
+        0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
 
     for label in host.split('.') {
         if label.is_empty() || label.len() > 63 {
@@ -132,11 +134,7 @@ pub async fn resolve_host_adguard(host: &str, cfg: &NetworkDnsConfig) -> Option<
 }
 
 /// Handles SOCKS5 protocol handshake, request parsing, AdGuard resolution, and forwarding.
-async fn handle_socks5(
-    mut client: TcpStream,
-    initial_buf: &[u8],
-    cfg: Arc<NetworkDnsConfig>,
-) {
+async fn handle_socks5(mut client: TcpStream, initial_buf: &[u8], cfg: Arc<NetworkDnsConfig>) {
     // 1. Negotiation Greeting
     // initial_buf contains [0x05, nmethods, methods...]
     if initial_buf.len() < 2 || initial_buf[0] != 0x05 {
@@ -165,7 +163,9 @@ async fn handle_socks5(
     }
     if header[0] != 0x05 || header[1] != 0x01 {
         // CMD != 1 (CONNECT): command not supported
-        let _ = client.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        let _ = client
+            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await;
         return;
     }
 
@@ -217,7 +217,9 @@ async fn handle_socks5(
             Some(ip) => ip,
             None => {
                 // Host unreachable
-                let _ = client.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                let _ = client
+                    .write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await;
                 return;
             }
         },
@@ -225,7 +227,9 @@ async fn handle_socks5(
 
     if resolved_ip.is_unspecified() {
         // Blocked by ruleset: 0x02 = connection not allowed by ruleset
-        let _ = client.write_all(&[0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        let _ = client
+            .write_all(&[0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await;
         return;
     }
 
@@ -234,13 +238,19 @@ async fn handle_socks5(
     match TcpStream::connect(target_addr).await {
         Ok(mut upstream) => {
             // Success reply: 0x00 = succeeded
-            if client.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await.is_ok() {
+            if client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+                .await
+                .is_ok()
+            {
                 let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
             }
         }
         Err(_) => {
             // Connection refused: 0x05
-            let _ = client.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            let _ = client
+                .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await;
         }
     }
 }
@@ -271,7 +281,10 @@ fn parse_http_target(first_line: &str, full_headers: &str) -> Option<(String, u1
 
     // Fallback: parse Host header
     for line in full_headers.lines() {
-        if let Some(rest) = line.strip_prefix("Host:").or_else(|| line.strip_prefix("host:")) {
+        if let Some(rest) = line
+            .strip_prefix("Host:")
+            .or_else(|| line.strip_prefix("host:"))
+        {
             let trimmed = rest.trim();
             let mut hp = trimmed.split(':');
             let host = hp.next()?.to_string();
@@ -327,7 +340,11 @@ async fn handle_http(
 
     if first_line.starts_with("CONNECT ") {
         // HTTPS tunnel establishment
-        if client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.is_ok() {
+        if client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .is_ok()
+        {
             let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         }
     } else {
@@ -405,7 +422,10 @@ mod tests {
     async fn test_adguard_doh_rfc8484_resolution() {
         let cfg = NetworkDnsConfig::default();
         let res = resolve_with_adguard_doh("biztoc.com", &cfg.doh_url).await;
-        assert!(res.is_some(), "biztoc.com should resolve via default AdGuard DoH (rfc8484)");
+        assert!(
+            res.is_some(),
+            "biztoc.com should resolve via default AdGuard DoH (rfc8484)"
+        );
         let ip = res.unwrap();
         assert!(!ip.is_unspecified(), "biztoc.com IP must not be 0.0.0.0");
     }
@@ -414,7 +434,11 @@ mod tests {
     async fn test_adguard_plain_udp_resolution() {
         let cfg = NetworkDnsConfig::default();
         let res = resolve_with_adguard_plain_udp("biztoc.com", &cfg.plain_dns_ip).await;
-        assert!(res.is_some(), "biztoc.com should resolve via default AdGuard plain UDP ({})", cfg.plain_dns_ip);
+        assert!(
+            res.is_some(),
+            "biztoc.com should resolve via default AdGuard plain UDP ({})",
+            cfg.plain_dns_ip
+        );
         let ip = res.unwrap();
         assert!(!ip.is_unspecified(), "biztoc.com IP must not be 0.0.0.0");
     }
@@ -424,12 +448,25 @@ mod tests {
         let cfg = NetworkDnsConfig::default();
         // Blocked domain: adservice.google.com
         let res_doh = resolve_with_adguard_doh("adservice.google.com", &cfg.doh_url).await;
-        assert!(res_doh.is_some(), "AdGuard DoH should return response for tracker");
-        assert!(res_doh.unwrap().is_unspecified(), "Tracker domain must resolve to 0.0.0.0");
+        assert!(
+            res_doh.is_some(),
+            "AdGuard DoH should return response for tracker"
+        );
+        assert!(
+            res_doh.unwrap().is_unspecified(),
+            "Tracker domain must resolve to 0.0.0.0"
+        );
 
-        let res_udp = resolve_with_adguard_plain_udp("adservice.google.com", &cfg.plain_dns_ip).await;
-        assert!(res_udp.is_some(), "AdGuard plain UDP should return response for tracker");
-        assert!(res_udp.unwrap().is_unspecified(), "Tracker domain must resolve to 0.0.0.0 via plain UDP");
+        let res_udp =
+            resolve_with_adguard_plain_udp("adservice.google.com", &cfg.plain_dns_ip).await;
+        assert!(
+            res_udp.is_some(),
+            "AdGuard plain UDP should return response for tracker"
+        );
+        assert!(
+            res_udp.unwrap().is_unspecified(),
+            "Tracker domain must resolve to 0.0.0.0 via plain UDP"
+        );
     }
 
     #[tokio::test]
@@ -444,7 +481,10 @@ mod tests {
             let n = socket.read(&mut buf).await.unwrap();
             let req = String::from_utf8_lossy(&buf[..n]);
             assert!(req.contains("GET /test HTTP/1.1"));
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHELLO_UPSTREAM").await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHELLO_UPSTREAM")
+                .await
+                .unwrap();
         });
 
         // 2. Start proxy
@@ -452,15 +492,23 @@ mod tests {
         let proxy_port = start_adguard_proxy(cfg).await.unwrap();
 
         // 3. Connect client to proxy and send absolute-form HTTP request
-        let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port))).await.unwrap();
+        let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
+            .await
+            .unwrap();
         let req = format!("GET http://127.0.0.1:{}/test HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", upstream_port, upstream_port);
         client.write_all(req.as_bytes()).await.unwrap();
 
         let mut resp = Vec::new();
         client.read_to_end(&mut resp).await.unwrap();
         let resp_str = String::from_utf8_lossy(&resp);
-        assert!(resp_str.contains("HTTP/1.1 200 OK"), "Must receive 200 OK from upstream");
-        assert!(resp_str.contains("HELLO_UPSTREAM"), "Must receive body payload from upstream");
+        assert!(
+            resp_str.contains("HTTP/1.1 200 OK"),
+            "Must receive 200 OK from upstream"
+        );
+        assert!(
+            resp_str.contains("HELLO_UPSTREAM"),
+            "Must receive body payload from upstream"
+        );
     }
 
     #[tokio::test]
@@ -482,14 +530,19 @@ mod tests {
         let proxy_port = start_adguard_proxy(cfg).await.unwrap();
 
         // 3. Connect to proxy and establish CONNECT tunnel
-        let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port))).await.unwrap();
+        let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
+            .await
+            .unwrap();
         let connect_req = format!("CONNECT 127.0.0.1:{} HTTP/1.1\r\n\r\n", upstream_port);
         client.write_all(connect_req.as_bytes()).await.unwrap();
 
         let mut buf = [0u8; 1024];
         let n = client.read(&mut buf).await.unwrap();
         let status = String::from_utf8_lossy(&buf[..n]);
-        assert!(status.contains("200 Connection Established"), "Must establish CONNECT tunnel");
+        assert!(
+            status.contains("200 Connection Established"),
+            "Must establish CONNECT tunnel"
+        );
 
         // Send payload through tunnel
         client.write_all(b"PING_TUNNEL").await.unwrap();
@@ -516,13 +569,19 @@ mod tests {
         let proxy_port = start_adguard_proxy(cfg).await.unwrap();
 
         // 3. Connect client and perform SOCKS5 handshake
-        let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port))).await.unwrap();
+        let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
+            .await
+            .unwrap();
         // Client Greeting: [VER=5, NMETHODS=1, METHOD=0 (No Auth)]
         client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
 
         let mut greet_resp = [0u8; 2];
         client.read_exact(&mut greet_resp).await.unwrap();
-        assert_eq!(greet_resp, [0x05, 0x00], "SOCKS5 server must accept no-auth");
+        assert_eq!(
+            greet_resp,
+            [0x05, 0x00],
+            "SOCKS5 server must accept no-auth"
+        );
 
         // 4. Client Request: CONNECT to 127.0.0.1:<upstream_port> (IPv4 ATYP=0x01)
         let mut req = vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1];
@@ -547,15 +606,25 @@ mod tests {
         let proxy_port = start_adguard_proxy(cfg).await.unwrap();
 
         // 1. HTTP CONNECT to blocked tracker must receive 403
-        let mut client_http = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port))).await.unwrap();
-        client_http.write_all(b"CONNECT adservice.google.com:443 HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut client_http = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
+            .await
+            .unwrap();
+        client_http
+            .write_all(b"CONNECT adservice.google.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
         let mut buf = [0u8; 512];
         let n = client_http.read(&mut buf).await.unwrap();
         let resp = String::from_utf8_lossy(&buf[..n]);
-        assert!(resp.contains("403 Forbidden"), "HTTP proxy must return 403 for blocked tracker");
+        assert!(
+            resp.contains("403 Forbidden"),
+            "HTTP proxy must return 403 for blocked tracker"
+        );
 
         // 2. SOCKS5 CONNECT to blocked tracker must receive REP=0x02
-        let mut client_socks = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port))).await.unwrap();
+        let mut client_socks = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
+            .await
+            .unwrap();
         client_socks.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
         let mut greet = [0u8; 2];
         client_socks.read_exact(&mut greet).await.unwrap();
@@ -571,6 +640,9 @@ mod tests {
         let n = client_socks.read(&mut resp).await.unwrap();
         assert!(n >= 2);
         assert_eq!(resp[0], 0x05);
-        assert_eq!(resp[1], 0x02, "SOCKS5 must return REP=0x02 (connection not allowed) for blocked tracker");
+        assert_eq!(
+            resp[1], 0x02,
+            "SOCKS5 must return REP=0x02 (connection not allowed) for blocked tracker"
+        );
     }
 }
