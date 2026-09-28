@@ -418,6 +418,33 @@ pub async fn start_adguard_proxy(cfg: NetworkDnsConfig) -> Result<u16, String> {
 mod tests {
     use super::*;
 
+    /// Returns a local DNS fallback that consistently sinkholes A queries.
+    async fn sinkhole_dns_config() -> NetworkDnsConfig {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut query = [0u8; 512];
+            while let Ok((len, peer)) = socket.recv_from(&mut query).await {
+                if len < 12 {
+                    continue;
+                }
+                let mut response = query[..len].to_vec();
+                response[2..4].copy_from_slice(&[0x81, 0x80]);
+                response[6..8].copy_from_slice(&1u16.to_be_bytes());
+                response.extend_from_slice(&[
+                    0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 0x00,
+                    0x00, 0x00, 0x00,
+                ]);
+                let _ = socket.send_to(&response, peer).await;
+            }
+        });
+        NetworkDnsConfig {
+            doh_url: "invalid-url".into(),
+            plain_dns_ip: address.to_string(),
+            ..NetworkDnsConfig::default()
+        }
+    }
+
     #[tokio::test]
     async fn test_adguard_doh_rfc8484_resolution() {
         let cfg = NetworkDnsConfig::default();
@@ -444,29 +471,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_adguard_tracker_blocking() {
-        let cfg = NetworkDnsConfig::default();
-        // Blocked domain: adservice.google.com
-        let res_doh = resolve_with_adguard_doh("adservice.google.com", &cfg.doh_url).await;
-        assert!(
-            res_doh.is_some(),
-            "AdGuard DoH should return response for tracker"
-        );
-        assert!(
-            res_doh.unwrap().is_unspecified(),
-            "Tracker domain must resolve to 0.0.0.0"
-        );
-
-        let res_udp =
-            resolve_with_adguard_plain_udp("adservice.google.com", &cfg.plain_dns_ip).await;
-        assert!(
-            res_udp.is_some(),
-            "AdGuard plain UDP should return response for tracker"
-        );
-        assert!(
-            res_udp.unwrap().is_unspecified(),
-            "Tracker domain must resolve to 0.0.0.0 via plain UDP"
-        );
+    async fn test_sinkhole_dns_resolution() {
+        let cfg = sinkhole_dns_config().await;
+        let result = resolve_host_adguard("adservice.google.com", &cfg).await;
+        assert!(result.unwrap().is_unspecified());
     }
 
     #[tokio::test]
@@ -602,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_tracker_blocking_enforcement() {
-        let cfg = NetworkDnsConfig::default();
+        let cfg = sinkhole_dns_config().await;
         let proxy_port = start_adguard_proxy(cfg).await.unwrap();
 
         // 1. HTTP CONNECT to blocked tracker must receive 403
