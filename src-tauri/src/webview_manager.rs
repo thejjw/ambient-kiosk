@@ -130,6 +130,9 @@ fn guest_data_directory(window: &Window) -> Result<std::path::PathBuf, String> {
 /// Removes only prior application sessions whose exclusive lock is no longer held.
 #[cfg(target_os = "windows")]
 fn cleanup_inactive_guest_profiles(profiles: &std::path::Path) {
+    let Ok(resolved_root) = std::fs::canonicalize(profiles) else {
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(profiles) else {
         return;
     };
@@ -141,6 +144,12 @@ fn cleanup_inactive_guest_profiles(profiles: &std::path::Path) {
                 .file_type()
                 .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
         {
+            continue;
+        }
+        let Ok(resolved_candidate) = std::fs::canonicalize(&path) else {
+            continue;
+        };
+        if resolved_candidate.parent() != Some(resolved_root.as_path()) {
             continue;
         }
         let marker = path.join("session.lock");
