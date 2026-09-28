@@ -4,9 +4,9 @@ pub mod proxy;
 pub mod tour;
 pub mod webview_manager;
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{Emitter, LogicalSize, Manager};
+use tauri::{Emitter, Manager, PhysicalSize};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 fn get_kiosk_shortcuts() -> [Shortcut; 6] {
@@ -38,6 +38,56 @@ struct FocusShortcutManager {
     hud_focused: bool,
 }
 
+struct HudInteractionState {
+    settings_open: AtomicBool,
+    shortcut_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+}
+
+// Keep the overlay in the main window's physical client coordinates at every DPI.
+fn align_hud(app: &tauri::AppHandle, settings_open: bool) -> Result<(), String> {
+    let main = app.get_window("main").ok_or("Main window is unavailable")?;
+    let hud = app
+        .get_window("hud-overlay")
+        .ok_or("HUD window is unavailable")?;
+    let origin = main.inner_position().map_err(|e| e.to_string())?;
+    let size = main.inner_size().map_err(|e| e.to_string())?;
+    let scale = main.scale_factor().map_err(|e| e.to_string())?;
+    let height = if settings_open {
+        size.height.min((900.0 * scale).round() as u32)
+    } else {
+        (48.0 * scale).round() as u32
+    };
+    hud.set_position(origin).map_err(|e| e.to_string())?;
+    hud.set_size(PhysicalSize::new(size.width, height.max(1)))
+        .map_err(|e| e.to_string())
+}
+
+/// Change drawer interaction only from the trusted HUD webview.
+#[tauri::command]
+fn set_settings_open(
+    webview_window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<HudInteractionState>>,
+    open: bool,
+) -> Result<(), String> {
+    if webview_window.label() != "hud-overlay" {
+        return Err("Only the HUD can change settings state".into());
+    }
+    align_hud(&app, open)?;
+    app.get_window("hud-overlay")
+        .ok_or("HUD window is unavailable")?
+        .set_ignore_cursor_events(false)
+        .map_err(|e| e.to_string())?;
+    state.settings_open.store(open, Ordering::SeqCst);
+    let focused = app
+        .get_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false)
+        || webview_window.is_focused().unwrap_or(false);
+    let _ = state.shortcut_tx.send(!open && focused);
+    Ok(())
+}
+
 impl FocusShortcutManager {
     fn new() -> Self {
         Self {
@@ -56,6 +106,11 @@ pub fn run() {
 
     let (shortcut_tx, mut shortcut_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
     let shortcut_tx_cb = shortcut_tx.clone();
+    let hud_state = Arc::new(HudInteractionState {
+        settings_open: AtomicBool::new(false),
+        shortcut_tx: shortcut_tx.clone(),
+    });
+    let hud_state_cb = hud_state.clone();
 
     tauri::Builder::default()
         .on_window_event(move |window, event| {
@@ -80,7 +135,8 @@ pub fn run() {
                         if let Some(hud) = app_handle.get_window("hud-overlay") {
                             let _ = hud.show();
                         }
-                        let _ = shortcut_tx_cb.send(true);
+                        let _ =
+                            shortcut_tx_cb.send(!hud_state_cb.settings_open.load(Ordering::SeqCst));
                     } else {
                         // Focus lost: debounce 150ms and re-query OS focus before requesting unregister
                         let app_handle_delayed = app_handle.clone();
@@ -121,28 +177,58 @@ pub fn run() {
                         });
                     }
                 }
-                tauri::WindowEvent::Moved(pos) if label == "main" => {
-                    if let Some(hud) = app_handle.get_window("hud-overlay") {
-                        let _ = hud.set_position(*pos);
-                    }
+                tauri::WindowEvent::Moved(_) if label == "main" => {
+                    let _ = align_hud(
+                        &app_handle,
+                        hud_state_cb.settings_open.load(Ordering::SeqCst),
+                    );
                 }
                 tauri::WindowEvent::Resized(size) if label == "main" => {
                     let scale = window.scale_factor().unwrap_or(1.0);
                     let logical_w = size.width as f64 / scale;
                     let logical_h = size.height as f64 / scale;
 
+                    let minimized = window.is_minimized().unwrap_or(false);
                     if let Some(hud) = app_handle.get_window("hud-overlay") {
-                        let _ = hud.set_size(LogicalSize::new(logical_w, 48.0));
+                        if minimized || size.width == 0 || size.height == 0 {
+                            let _ = hud.hide();
+                        } else {
+                            let _ = align_hud(
+                                &app_handle,
+                                hud_state_cb.settings_open.load(Ordering::SeqCst),
+                            );
+                            if window.is_focused().unwrap_or(false)
+                                || hud.is_focused().unwrap_or(false)
+                            {
+                                let _ = hud.show();
+                            }
+                        }
                     }
 
                     if let Some(ctrl) = app_handle.try_state::<Arc<tour::TourController>>() {
                         ctrl.inner().handle_window_resize(logical_w, logical_h);
                     }
                 }
+                tauri::WindowEvent::ScaleFactorChanged { .. } if label == "main" => {
+                    let _ = align_hud(
+                        &app_handle,
+                        hud_state_cb.settings_open.load(Ordering::SeqCst),
+                    );
+                }
+                tauri::WindowEvent::CloseRequested { .. } if label == "main" => {
+                    let _ = shortcut_tx_cb.send(false);
+                    if let Some(hud) = app_handle.get_window("hud-overlay") {
+                        let _ = hud.close();
+                    }
+                }
+                tauri::WindowEvent::Destroyed if label == "main" => {
+                    app_handle.exit(0);
+                }
                 _ => {}
             }
         })
         .setup(move |app| {
+            app.manage(hud_state.clone());
             let app_data_dir = app
                 .path()
                 .app_config_dir()
@@ -223,11 +309,14 @@ pub fn run() {
             // 5. Setup global shortcut plugin with controller integration
             let ctrl_for_shortcuts = tour_controller.clone();
             let app_for_shortcuts = app.handle().clone();
+            let hud_state_for_shortcuts = hud_state.clone();
             let (hud_cmd_tx, mut hud_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
             let hud_cmd_tx_sc = hud_cmd_tx.clone();
             let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
+                    if event.state() == ShortcutState::Pressed
+                        && !hud_state_for_shortcuts.settings_open.load(Ordering::SeqCst)
+                    {
                         let space_sc = Shortcut::new(Some(Modifiers::empty()), Code::Space);
                         let right_sc = Shortcut::new(Some(Modifiers::empty()), Code::ArrowRight);
                         let left_sc = Shortcut::new(Some(Modifiers::empty()), Code::ArrowLeft);
@@ -294,13 +383,10 @@ pub fn run() {
                 }
             });
 
-            // 6. Configure initial click-through state and align position/size with main window
+            // Configure initial click-through state and align with the client area.
             if let Some(hud) = app.get_window("hud-overlay") {
                 let _ = hud.set_ignore_cursor_events(true);
-                if let Ok(pos) = window.outer_position() {
-                    let _ = hud.set_position(pos);
-                }
-                let _ = hud.set_size(LogicalSize::new(win_width, 48.0));
+                align_hud(&app.handle().clone(), false)?;
             }
 
             // Seed initial shortcut desired focus state safely (default false for safety)
@@ -313,6 +399,7 @@ pub fn run() {
             let _ = shortcut_tx.send(initial_focus);
             // 7. Native cursor tracking poller owning interactive state and leave_timer
             let cursor_app = app.handle().clone();
+            let hud_state_for_cursor = hud_state.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
                 let mut leave_timer = std::time::Instant::now();
@@ -330,6 +417,14 @@ pub fn run() {
                         None => continue,
                     };
 
+                    if hud_state_for_cursor.settings_open.load(Ordering::SeqCst) {
+                        if !is_interactive {
+                            let _ = hud_win.set_ignore_cursor_events(false);
+                            is_interactive = true;
+                        }
+                        continue;
+                    }
+
                     // Handle external toggle commands (e.g. from H hotkey)
                     while hud_cmd_rx.try_recv().is_ok() {
                         is_interactive = !is_interactive;
@@ -341,7 +436,7 @@ pub fn run() {
                     }
 
                     if let Ok(cursor_pos) = main_win.cursor_position() {
-                        if let Ok(win_pos) = main_win.outer_position() {
+                        if let Ok(win_pos) = main_win.inner_position() {
                             if let Ok(win_size) = main_win.inner_size() {
                                 let scale = main_win.scale_factor().unwrap_or(1.0);
                                 let cx = cursor_pos.x;
@@ -395,6 +490,7 @@ pub fn run() {
             config::get_config,
             config::save_config,
             config::export_config,
+            set_settings_open,
             tour::start_tour,
             tour::pause_tour,
             tour::resume_tour,

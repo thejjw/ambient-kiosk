@@ -17,6 +17,7 @@
     "allow-get-config",
     "allow-save-config",
     "allow-export-config",
+    "allow-set-settings-open",
     "allow-start-tour",
     "allow-pause-tour",
     "allow-resume-tour",
