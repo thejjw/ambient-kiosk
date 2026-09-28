@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Ambient full-bleed scroll-free dynamic multi-feed kiosk with alternating tour"
 authors = ["thejjw"]
 edition = "2021"
+default-run = "ambient-kiosk"
 
 [lib]
 name = "ambient_kiosk_lib"
