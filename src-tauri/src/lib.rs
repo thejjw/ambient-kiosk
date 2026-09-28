@@ -131,12 +131,21 @@ pub fn run() {
                     let current_focus_gen = focus_gen_cb.fetch_add(1, Ordering::SeqCst) + 1;
 
                     if *focused {
-                        // Focus gained: immediately show HUD and request shortcut registration
+                        // A minimized main window must never leave the HUD above other apps.
+                        let minimized = app_handle
+                            .get_window("main")
+                            .and_then(|w| w.is_minimized().ok())
+                            .unwrap_or(false);
                         if let Some(hud) = app_handle.get_window("hud-overlay") {
-                            let _ = hud.show();
+                            if minimized {
+                                let _ = hud.hide();
+                            } else {
+                                let _ = hud.show();
+                            }
                         }
-                        let _ =
-                            shortcut_tx_cb.send(!hud_state_cb.settings_open.load(Ordering::SeqCst));
+                        let _ = shortcut_tx_cb.send(
+                            !minimized && !hud_state_cb.settings_open.load(Ordering::SeqCst),
+                        );
                     } else {
                         // Focus lost: debounce 150ms and re-query OS focus before requesting unregister
                         let app_handle_delayed = app_handle.clone();
@@ -214,6 +223,16 @@ pub fn run() {
                         &app_handle,
                         hud_state_cb.settings_open.load(Ordering::SeqCst),
                     );
+                    if let (Ok(size), Ok(scale), Some(ctrl)) = (
+                        window.inner_size(),
+                        window.scale_factor(),
+                        app_handle.try_state::<Arc<tour::TourController>>(),
+                    ) {
+                        ctrl.inner().handle_window_resize(
+                            size.width as f64 / scale,
+                            size.height as f64 / scale,
+                        );
+                    }
                 }
                 tauri::WindowEvent::CloseRequested { .. } if label == "main" => {
                     let _ = shortcut_tx_cb.send(false);
