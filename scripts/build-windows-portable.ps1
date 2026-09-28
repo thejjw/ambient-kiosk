@@ -80,5 +80,11 @@ Set-Content -LiteralPath (Join-Path $stage 'BUILD-MANIFEST.txt') -Value $manifes
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath -CompressionLevel Optimal
 $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
 Set-Content -LiteralPath "$zipPath.sha256" -Value "$zipHash  $([IO.Path]::GetFileName($zipPath))" -Encoding ascii
+$outputRoot = $OutputDirectory.TrimEnd('\') + '\'
+$stagePath = [System.IO.Path]::GetFullPath($stage)
+if (-not $stagePath.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Stage path escaped the output directory: $stagePath"
+}
+Remove-Item -LiteralPath $stagePath -Recurse -Force
 Write-Host "Portable package: $zipPath"
 Write-Host "SHA256: $zipHash"

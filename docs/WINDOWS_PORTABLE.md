@@ -40,3 +40,14 @@ the pinned file is absent. Build from a clean committed checkout.
 
 The ZIP is unsigned. Windows may show a SmartScreen prompt when opening a
 downloaded unsigned executable.
+
+## Validation status
+
+On the Windows 11 build machine, `bun test` passed 5 UI tests, Rust passed
+30 unit tests, and `bun run tauri build --no-bundle --ci` produced the release
+executable. The portable ZIP hash and required files were checked. A local
+launch loaded live web content using the bundled WebView2 runtime; all of the
+app-owned browser processes exited when that test run stopped.
+
+The checklist in `MANUAL_TESTING.md` remains open for interactive HUD, mixed
+DPI, offline launch without Evergreen WebView2, and extended tour testing.
