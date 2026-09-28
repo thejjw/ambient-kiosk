@@ -69,7 +69,7 @@ open "ambient-kiosk/src-tauri/target/debug/bundle/macos/Ambient Kiosk.app"
   * Reorder feeds using `↑` and `↓` buttons.
   * Delete feeds using `✕` (disabled when only 1 feed remains).
   * Add feeds using `+ Add Endpoint` (disabled when reaching `max_resident_webviews`).
-* [ ] **Saving Preferences**: Click "Save Changes" to atomically persist configuration to `~/Library/Application Support/com.ambientkiosk.kiosk/config.json`.
+* [ ] **Saving Preferences**: Click "Save Changes" to atomically persist configuration to the platform's app config directory (`%APPDATA%\com.ambientkiosk.kiosk\config.json` on Windows). Restart and confirm the new settings take effect.
 * [ ] **Exporting Configuration**: Click "Export Configuration..." to save a portable JSON configuration file to a custom destination.
 
 ---
@@ -84,3 +84,17 @@ open "ambient-kiosk/src-tauri/target/debug/bundle/macos/Ambient Kiosk.app"
 
 * **Debug Build Keychain Prompt**: When running unsigned debug builds on macOS, third-party guest web feeds (such as AP News with Turnstile) may cause WebKit to request access to an existing WebCrypto master key in the login keychain.
 * **Action**: Clicking **"Deny"** dismisses the dialog and allows the kiosk session to continue without granting keychain access.
+
+---
+
+## 4. Windows 11 x64 Portable Release
+
+* [ ] Build the ZIP from a clean checkout with `scripts\build-windows-portable.ps1`; verify its SHA-256 file and `BUILD-MANIFEST.txt`.
+* [ ] Extract to a local path containing spaces and Korean characters. Launch `ambient-kiosk.exe` directly from a different working directory and confirm it uses the adjacent `runtime` folder.
+* [ ] On a clean Windows 11 x64 environment without Evergreen WebView2, launch while network access is disabled. The HUD must appear without a runtime download; enable networking and verify feeds.
+* [ ] Confirm both default proxy mode and configured system-DNS mode load feeds. Check that no guest has Tauri IPC access.
+* [ ] Open Settings, wait more than 1.5 seconds, then click and type in its lower controls. Confirm H, Space, and arrows work as text/caret input while editing, and Escape closes Settings.
+* [ ] Move between 100%, 150%, and 200% displays, including a monitor with negative desktop coordinates. Resize, toggle fullscreen, minimize and restore; the HUD and tiles must stay aligned.
+* [ ] Alt-Tab away and type the kiosk hotkeys in another app; they must not affect that app. Return, then close the main window and confirm no HUD or proxy process remains.
+* [ ] Save settings and restart. Confirm AppData persistence, adjacent read-only `kiosk-config.json` precedence, and explicit `--config` paths with spaces.
+* [ ] Run the tour for one hour and relaunch twice; confirm no accumulating application windows or active guest profile processes.
