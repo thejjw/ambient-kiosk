@@ -2,6 +2,12 @@ use crate::config::EndpointItem;
 use crate::layout::LogicalRect;
 use parking_lot::Mutex;
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "windows")]
+use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt, sync::OnceLock};
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 use tauri::{
     webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder},
     LogicalPosition, LogicalSize, Webview, WebviewUrl, Window,
@@ -88,6 +94,73 @@ pub fn is_allowed_navigation_scheme(url: &Url) -> bool {
     url.scheme() == "https" || url.scheme() == "http"
 }
 
+/// Creates one isolated WebView2 data directory for all guest tiles in this launch.
+#[cfg(target_os = "windows")]
+fn guest_data_directory(window: &Window) -> Result<std::path::PathBuf, String> {
+    static SESSION_LOCK: OnceLock<std::fs::File> = OnceLock::new();
+    let local_data = window
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to locate local browser data directory: {e}"))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Failed to generate guest browser session ID: {e}"))?
+        .as_nanos();
+    let profiles = local_data.join("guest-profiles");
+    std::fs::create_dir_all(&profiles)
+        .map_err(|e| format!("Failed to create guest browser profile root: {e}"))?;
+    cleanup_inactive_guest_profiles(&profiles);
+
+    let directory = profiles.join(format!("session-{}-{timestamp}", std::process::id()));
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| format!("Failed to create guest browser data directory: {e}"))?;
+    let marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(directory.join("session.lock"))
+        .map_err(|e| format!("Failed to lock guest browser data directory: {e}"))?;
+    SESSION_LOCK
+        .set(marker)
+        .map_err(|_| "Guest browser session was initialized twice".to_string())?;
+    Ok(directory)
+}
+
+/// Removes only prior application sessions whose exclusive lock is no longer held.
+#[cfg(target_os = "windows")]
+fn cleanup_inactive_guest_profiles(profiles: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(profiles) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("session-")
+            || !entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+        {
+            continue;
+        }
+        let marker = path.join("session.lock");
+        if !marker.is_file() {
+            continue;
+        }
+        // A running instance holds this file exclusively. A stale session can be
+        // removed after its owner exits and WebView2 releases its browser files.
+        if OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&marker)
+            .is_ok()
+        {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// Spawns resident child native webviews for all configured endpoints ($M = N$).
 /// Each webview is securely quarantined with zero IPC permissions, constrained navigation,
 /// and automatic popup rejection.
@@ -109,6 +182,9 @@ pub fn spawn_resident_webviews(
     let proxy_url_parsed =
         proxy_port.and_then(|port| Url::parse(&format!("http://127.0.0.1:{}", port)).ok());
 
+    #[cfg(target_os = "windows")]
+    let guest_data_dir = guest_data_directory(window)?;
+
     let mut tiles = Vec::with_capacity(endpoints.len());
 
     for (idx, (ep, rect)) in endpoints.iter().zip(rects.iter()).enumerate() {
@@ -119,6 +195,13 @@ pub fn spawn_resident_webviews(
             .map_err(|e| format!("Invalid URL for endpoint '{}': {}", ep.title, e))?;
 
         let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url));
+
+        #[cfg(target_os = "windows")]
+        {
+            // WebView2 shares environment options by data directory. Keep all guests
+            // together while separating their proxy setting from controller webviews.
+            builder = builder.data_directory(guest_data_dir.clone());
+        }
 
         if let Some(p_url) = &proxy_url_parsed {
             builder = builder.proxy_url(p_url.clone());
@@ -166,6 +249,40 @@ pub fn spawn_resident_webviews(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_preserves_active_and_unmarked_profiles() {
+        let root = std::env::temp_dir().join(format!(
+            "ambient-kiosk-profile-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let active = root.join("session-active");
+        let stale = root.join("session-stale");
+        let unmarked = root.join("session-unmarked");
+        for path in [&active, &stale, &unmarked] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let active_lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(active.join("session.lock"))
+            .unwrap();
+        std::fs::write(stale.join("session.lock"), []).unwrap();
+
+        cleanup_inactive_guest_profiles(&root);
+        assert!(active.exists());
+        assert!(!stale.exists());
+        assert!(unmarked.exists());
+
+        drop(active_lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn test_navigation_scheme_security() {
