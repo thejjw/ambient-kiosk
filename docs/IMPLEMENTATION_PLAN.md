@@ -130,6 +130,12 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Linux: `[Pending user environment compilation and testing]`
 * Documentation:
   * Completed architecture specification, implementation plan, manual testing checklist, and cross-platform guide.
+
+### Deferred: Refresh Scheduling and Observability
+* The current tour calls native `reload()` on the upcoming tile during minimization. `reload_interval_minutes` and `refresh_before_maximize` exist in configuration but do not currently control that behavior.
+* Add a per-feed refresh schedule and define how it interacts with tour-driven reloads, pause, failures, and the one-reload-at-a-time limit.
+* Record bounded, rotating app-local refresh diagnostics: endpoint ID, trigger, request time, load-finished or timeout/error outcome, and elapsed time. Avoid full URLs, page content, and sensitive query strings. A page-load event confirms the webview finished loading; it does not prove the publisher changed its content.
+* Expose the last attempted and last completed refresh time in the HUD or settings, with a visible failure state, then verify timing against a controlled test page.
 ---
 
 ## Cross-Platform Implementation Guide (Windows & Linux)
