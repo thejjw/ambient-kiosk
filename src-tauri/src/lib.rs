@@ -1,4 +1,5 @@
 pub mod config;
+pub mod diagnostics;
 pub mod layout;
 pub mod proxy;
 pub mod tour;
@@ -241,12 +242,17 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Destroyed if label == "main" => {
+                    if let Some(diagnostics) = app_handle.try_state::<Arc<diagnostics::DiagnosticsState>>() {
+                        diagnostics.shutdown();
+                    }
                     app_handle.exit(0);
                 }
                 _ => {}
             }
         })
         .setup(move |app| {
+            let diagnostics = diagnostics::DiagnosticsState::initialize(app.handle());
+            app.manage(diagnostics.clone());
             app.manage(hud_state.clone());
             let app_data_dir = app
                 .path()
@@ -263,6 +269,20 @@ pub fn run() {
             .map_err(|e| format!("Failed to initialize kiosk configuration: {}", e))?;
 
             let cfg = meta.config.clone();
+            diagnostics.event(
+                tracing::Level::INFO,
+                "configuration",
+                "configuration_loaded",
+                serde_json::json!({
+                    "source": meta.source.to_string(),
+                    "endpoint_count": cfg.endpoints.len(),
+                    "proxy_enabled": cfg.network_dns.adblock_dns_enabled,
+                }),
+            );
+            diagnostics.set_feeds(
+                &cfg.endpoints.iter().map(|endpoint| endpoint.id.clone()).collect::<Vec<_>>(),
+                cfg.network_dns.adblock_dns_enabled,
+            );
             let config_state = Arc::new(config::AppConfigState::new(meta, app_data_dir));
             app.manage(config_state);
 
