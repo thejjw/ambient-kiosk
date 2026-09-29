@@ -132,6 +132,12 @@ bun run tauri dev
 ```bash
 bun run tauri build
 ```
+
+### Windows 11 x64 Portable ZIP
+
+Run `powershell.exe -ExecutionPolicy Bypass -File scripts\build-windows-portable.ps1`
+from a clean checkout on Windows 11 x64. The output ZIP contains the app and
+Microsoft's Fixed Version WebView2 runtime; see [Windows portable instructions](docs/WINDOWS_PORTABLE.md).
 ---
 
 ## License

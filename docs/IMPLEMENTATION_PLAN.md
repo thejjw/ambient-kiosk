@@ -126,9 +126,16 @@ This document outlines the step-by-step implementation roadmap for building **Am
   * Verified bounded pool ceiling (`max_resident_webviews <= 16`) prevents runaway process allocation via automated unit test.
 * Cross-platform verification:
   * macOS: Automated suites passing (29 unit tests, 5 UI tests); manual runtime checklist documented in `docs/MANUAL_TESTING.md`.
-  * Windows & Linux: `[Pending user environment compilation and testing]`
+  * Windows: Native compilation and portable packaging are implemented; runtime and clean-machine checks are tracked in `docs/WINDOWS_PORTABLE.md` and `docs/MANUAL_TESTING.md`.
+  * Linux: `[Pending user environment compilation and testing]`
 * Documentation:
   * Completed architecture specification, implementation plan, manual testing checklist, and cross-platform guide.
+
+### Deferred: Refresh Scheduling and Observability
+* The current tour calls native `reload()` on the upcoming tile during minimization. `reload_interval_minutes` and `refresh_before_maximize` exist in configuration but do not currently control that behavior.
+* Add a per-feed refresh schedule and define how it interacts with tour-driven reloads, pause, failures, and the one-reload-at-a-time limit.
+* Record bounded, rotating app-local refresh diagnostics: endpoint ID, trigger, request time, load-finished or timeout/error outcome, and elapsed time. Avoid full URLs, page content, and sensitive query strings. A page-load event confirms the webview finished loading; it does not prove the publisher changed its content.
+* Expose the last attempted and last completed refresh time in the HUD or settings, with a visible failure state, then verify timing against a controlled test page.
 ---
 
 ## Cross-Platform Implementation Guide (Windows & Linux)
@@ -193,6 +200,7 @@ Implementors deploying or testing on Windows and Linux must understand the follo
    * *Architecture*: Tauri v2 uses Microsoft Edge WebView2 (Chromium engine) via Win32 child `HWND`s.
    * *System Requirement*: While Windows 11 includes the WebView2 runtime pre-installed, Windows 10 deployment should verify or install the Evergreen WebView2 Runtime to guarantee availability.
    * *Per-Webview Proxying*: `WebviewBuilder::proxy_url("http://127.0.0.1:<port>")` is supported by WebView2 without requiring special compilation flags.
+   * *Portable Windows 11 x64 release*: `scripts/build-windows-portable.ps1` packages a pinned Fixed Version runtime beside the executable. Guest webviews use a separate LocalAppData profile so their proxy options do not conflict with controller webviews.
 
 2. **Window Background & Transparency**:
    * *Behavior*: Win32 ignores alpha channels on standard window surfaces, but WebView2 supports transparent background composition natively.
@@ -200,7 +208,7 @@ Implementors deploying or testing on Windows and Linux must understand the follo
 
 3. **High-DPI Coordinate Systems (Per-Monitor V2)**:
    * *Architecture*: Windows uses Per-Monitor V2 DPI scaling. `main_win.cursor_position()` and `outer_position()` return desktop physical coordinates.
-   * *Implementor Action*: Verify that moving the window across monitors with mixed scaling (e.g., a 4K display at 150% and a 1080p display at 100%) correctly recalculates logical window bounds via `main_win.scale_factor()`.
+   * *Implementor Action*: The HUD aligns to the main client area's physical origin and size on move, resize, and scale changes. Verify behavior across monitors with mixed scaling (e.g., 4K at 150% and 1080p at 100%).
 
 4. **Console Window Subsystem**:
    * *Setup*: `src-tauri/src/main.rs` includes `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`, ensuring no background command prompt window is spawned in release builds.

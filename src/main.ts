@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export interface EndpointItem {
   id: string;
@@ -88,7 +88,6 @@ if (typeof window !== "undefined") {
 }
 
 function initHudWindow() {
-  const currentWindow = getCurrentWindow();
   const hudOverlay = document.getElementById("hud-overlay")!;
   const hudStatus = document.getElementById("hud-status")!;
   const hudTitle = document.getElementById("hud-title")!;
@@ -140,15 +139,25 @@ function initHudWindow() {
   }
 
   async function openSettings() {
+    try {
+      await invoke("set_settings_open", { open: true });
+    } catch (err) {
+      alert("Could not open settings: " + err);
+      return;
+    }
     settingsDrawer.classList.remove("hidden");
     showHud();
-    await currentWindow.setSize(new LogicalSize(window.innerWidth, Math.min(900, window.screen.availHeight || 900)));
     loadConfigIntoDrawer();
   }
 
   async function closeSettings() {
+    try {
+      await invoke("set_settings_open", { open: false });
+    } catch (err) {
+      alert("Could not close settings: " + err);
+      return;
+    }
     settingsDrawer.classList.add("hidden");
-    await currentWindow.setSize(new LogicalSize(window.innerWidth, 48));
     scheduleHideHud();
   }
 
@@ -218,8 +227,8 @@ function initHudWindow() {
 
     try {
       await invoke("save_config", { newConfig: cfg });
-      alert("Configuration saved successfully.");
-      closeSettings();
+      alert("Saved - restart to apply changes.");
+      await closeSettings();
     } catch (err) {
       alert("Error saving config: " + err);
     }
@@ -238,25 +247,11 @@ function initHudWindow() {
     }
   });
 
-  // Keyboard shortcuts
+  // Native shortcuts are suspended while settings are open; Escape closes the drawer.
   window.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement) return;
-    if (e.code === "Space") {
+    if (e.code === "Escape" && !settingsDrawer.classList.contains("hidden")) {
       e.preventDefault();
-      togglePause();
-    } else if (e.code === "ArrowRight") {
-      invoke("next_tile");
-    } else if (e.code === "ArrowLeft") {
-      invoke("prev_tile");
-    } else if (e.code === "F11") {
-      e.preventDefault();
-      invoke("toggle_fullscreen");
-    } else if (e.code === "Escape") {
-      if (!settingsDrawer.classList.contains("hidden")) {
-        closeSettings();
-      } else {
-        invoke("minimize_current");
-      }
+      closeSettings();
     }
   });
 

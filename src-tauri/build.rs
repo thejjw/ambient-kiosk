@@ -4,6 +4,7 @@ fn main() {
             "get_config",
             "save_config",
             "export_config",
+            "set_settings_open",
             "start_tour",
             "pause_tour",
             "resume_tour",

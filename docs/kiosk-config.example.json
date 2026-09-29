@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "window": {
+    "fullscreen": false,
+    "decorations": false,
+    "background_color": "#0d0d0d",
+    "reserved_header_height_px": 0.0
+  },
+  "layout": {
+    "strategy": "auto",
+    "target_tile_aspect_ratio": 1.4,
+    "rows": null,
+    "padding_px": 0.0,
+    "gap_px": 0.0
+  },
+  "timing": {
+    "grid_view_duration_ms": 20000,
+    "maximized_hold_duration_ms": 30000,
+    "transition_duration_ms": 500,
+    "preparing_timeout_ms": 2500,
+    "user_idle_resume_ms": 15000
+  },
+  "tour": {
+    "auto_start": true,
+    "pause_on_interaction": true,
+    "refresh_before_maximize": true,
+    "loop_tour": true
+  },
+  "network_dns": {
+    "adblock_dns_enabled": true,
+    "dns_provider": "adguard_doh",
+    "doh_url": "https://dns.adguard-dns.com/dns-query",
+    "dot_url": "tls://dns.adguard-dns.com",
+    "plain_dns_ip": "94.140.14.14:53"
+  },
+  "limits": { "max_resident_webviews": 12 },
+  "endpoints": [
+    {
+      "id": "biztoc",
+      "title": "Biztoc",
+      "url": "https://biztoc.com/",
+      "zoom_factor": null,
+      "muted": true,
+      "reload_interval_minutes": null
+    }
+  ]
+}
