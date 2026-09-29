@@ -12,7 +12,7 @@ const globalScope = globalThis as unknown as {
 globalScope.window = happyWindow;
 globalScope.document = happyDoc;
 
-import { createEndpointRowElement, renderEndpointsList, EndpointItem } from "./main";
+import { createEndpointRowElement, renderEndpointsList, renderDiagnostics, EndpointItem, DiagnosticsSnapshot } from "./main";
 
 describe("Endpoint UI Security & Validation", () => {
   beforeEach(() => {
@@ -122,5 +122,45 @@ describe("Endpoint UI Security & Validation", () => {
     // Endpoints array swapped
     expect(endpoints[0].title).toBe("Site B");
     expect(endpoints[1].title).toBe("Site A");
+  });
+});
+
+describe("Operational diagnostics UI", () => {
+  beforeEach(() => {
+    happyDoc.body.innerHTML = '<div id="diagnostics-health"></div><div id="diagnostics-feeds"></div>';
+  });
+
+  test("shows refresh status and logging warnings without interpreting endpoint IDs as markup", () => {
+    const snapshot: DiagnosticsSnapshot = {
+      session_id: "session-test",
+      uptime_seconds: 65,
+      log_path: "C:\\logs\\ambient-kiosk.jsonl",
+      storage_available: false,
+      write_errors: 1,
+      dropped_records: 2,
+      tour_state: "GridView",
+      active_endpoint_id: null,
+      proxy_enabled: true,
+      proxy_connections: 3,
+      dns_resolved: 4,
+      dns_blocked: 1,
+      dns_failed: 0,
+      feeds: [{
+        endpoint_id: '<img src=x onerror="alert(1)">',
+        tile_index: 0,
+        last_attempt_at_ms: null,
+        last_completed_at_ms: null,
+        last_outcome: null,
+        elapsed_ms: null,
+        pending: false,
+      }],
+    };
+
+    renderDiagnostics(snapshot);
+
+    expect(happyDoc.getElementById("diagnostics-health")?.textContent).toContain("Logging warning");
+    expect(happyDoc.getElementById("diagnostics-feeds")?.textContent).toContain("Not attempted this session");
+    expect(happyDoc.getElementById("diagnostics-feeds")?.textContent).toContain(snapshot.feeds[0].endpoint_id);
+    expect(happyDoc.querySelector("#diagnostics-feeds img")).toBeNull();
   });
 });

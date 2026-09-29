@@ -67,6 +67,75 @@ export interface TourStatusPayload {
   is_paused: boolean;
 }
 
+export interface FeedRefreshStatus {
+  endpoint_id: string;
+  tile_index: number;
+  last_attempt_at_ms: number | null;
+  last_completed_at_ms: number | null;
+  last_outcome: string | null;
+  elapsed_ms: number | null;
+  pending: boolean;
+}
+
+export interface DiagnosticsSnapshot {
+  session_id: string;
+  uptime_seconds: number;
+  log_path: string;
+  storage_available: boolean;
+  write_errors: number;
+  dropped_records: number;
+  tour_state: string;
+  active_endpoint_id: string | null;
+  proxy_enabled: boolean;
+  proxy_connections: number;
+  dns_resolved: number;
+  dns_blocked: number;
+  dns_failed: number;
+  feeds: FeedRefreshStatus[];
+}
+
+/// Renders the diagnostics summary using text nodes so endpoint IDs stay inert.
+export function renderDiagnostics(snapshot: DiagnosticsSnapshot) {
+  const health = document.getElementById("diagnostics-health");
+  const feeds = document.getElementById("diagnostics-feeds");
+  if (!health || !feeds) return;
+
+  const hasWarning = !snapshot.storage_available || snapshot.write_errors > 0 || snapshot.dropped_records > 0;
+  health.classList.toggle("warning", hasWarning);
+  health.textContent = `${hasWarning ? "Logging warning" : "Logging active"} · ${snapshot.tour_state} · uptime ${formatUptime(snapshot.uptime_seconds)} · proxy ${snapshot.proxy_enabled ? "on" : "off"} (${snapshot.proxy_connections} connections, DNS ${snapshot.dns_resolved} resolved / ${snapshot.dns_blocked} blocked / ${snapshot.dns_failed} failed) · ${snapshot.write_errors} write errors · ${snapshot.dropped_records} dropped records`;
+
+  const path = document.createElement("div");
+  path.className = "diagnostics-path";
+  path.textContent = `Log file: ${snapshot.log_path}`;
+  feeds.replaceChildren(path);
+
+  for (const feed of snapshot.feeds) {
+    const row = document.createElement("div");
+    row.className = "diagnostics-feed";
+    const heading = document.createElement("strong");
+    heading.textContent = `${feed.endpoint_id} · tile ${feed.tile_index + 1}`;
+    const attempt = feed.last_attempt_at_ms === null ? "Not attempted this session" : `Last attempt: ${formatTimestamp(feed.last_attempt_at_ms)}`;
+    const outcome = feed.pending ? "Refresh requested; waiting for a load finish" : feed.last_outcome ?? "No refresh outcome";
+    const elapsed = feed.elapsed_ms === null ? "" : ` · ${feed.elapsed_ms} ms`;
+    const completed = feed.last_completed_at_ms === null ? "" : ` · Last finish observed: ${formatTimestamp(feed.last_completed_at_ms)}`;
+    const detail = document.createElement("div");
+    detail.textContent = `${attempt} · ${outcome}${elapsed}${completed}`;
+    row.append(heading, detail);
+    feeds.append(row);
+  }
+}
+
+function formatTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleString();
+}
+
+function formatUptime(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
 export function bootstrapApp() {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     return;
@@ -107,6 +176,11 @@ function initHudWindow() {
   let currentConfigMeta: ConfigMetaResponse | null = null;
   let isPaused = false;
   let hudTimeout: number | null = null;
+  let diagnosticsTimer: number | null = null;
+  let diagnosticsLoading = false;
+
+  window.addEventListener("error", () => reportFrontendError("window_error"));
+  window.addEventListener("unhandledrejection", () => reportFrontendError("promise_rejection"));
 
   function showHud() {
     if (hudTimeout) {
@@ -148,6 +222,7 @@ function initHudWindow() {
     settingsDrawer.classList.remove("hidden");
     showHud();
     loadConfigIntoDrawer();
+    startDiagnosticsPolling();
   }
 
   async function closeSettings() {
@@ -158,7 +233,40 @@ function initHudWindow() {
       return;
     }
     settingsDrawer.classList.add("hidden");
+    if (diagnosticsTimer !== null) {
+      clearInterval(diagnosticsTimer);
+      diagnosticsTimer = null;
+    }
     scheduleHideHud();
+  }
+
+  function reportFrontendError(category: string) {
+    void invoke("report_frontend_error", { category }).catch(() => {});
+  }
+
+  async function refreshDiagnostics() {
+    if (diagnosticsLoading || settingsDrawer.classList.contains("hidden")) return;
+    diagnosticsLoading = true;
+    try {
+      const snapshot: DiagnosticsSnapshot = await invoke("get_diagnostics");
+      renderDiagnostics(snapshot);
+    } catch {
+      reportFrontendError("settings_load_failed");
+      const health = document.getElementById("diagnostics-health");
+      if (health) {
+        health.classList.add("warning");
+        health.textContent = "Diagnostics could not be loaded.";
+      }
+    } finally {
+      diagnosticsLoading = false;
+    }
+  }
+
+  function startDiagnosticsPolling() {
+    void refreshDiagnostics();
+    if (diagnosticsTimer === null) {
+      diagnosticsTimer = window.setInterval(() => void refreshDiagnostics(), 2000);
+    }
   }
 
   async function loadConfigIntoDrawer() {
@@ -212,6 +320,7 @@ function initHudWindow() {
         renderEndpointsList(cfg.endpoints, meta.is_readonly, cfg.limits.max_resident_webviews);
       };
     } catch (err) {
+      reportFrontendError("settings_load_failed");
       console.error("Failed to load config:", err);
     }
   }
@@ -230,6 +339,7 @@ function initHudWindow() {
       alert("Saved - restart to apply changes.");
       await closeSettings();
     } catch (err) {
+      reportFrontendError("settings_save_failed");
       alert("Error saving config: " + err);
     }
   });
@@ -242,6 +352,7 @@ function initHudWindow() {
         await invoke("export_config", { config: currentConfigMeta.config, destinationPath: path });
         alert("Configuration exported to " + path);
       } catch (err) {
+        reportFrontendError("settings_export_failed");
         alert("Error exporting config: " + err);
       }
     }

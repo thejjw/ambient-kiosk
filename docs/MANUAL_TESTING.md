@@ -61,6 +61,7 @@ open "ambient-kiosk/src-tauri/target/debug/bundle/macos/Ambient Kiosk.app"
 ### E. Settings Drawer & Persistence
 * [ ] **Opening Drawer**: Click the settings gear icon (`[⚙]`) on the HUD overlay. The settings drawer slides in from the right edge.
 * [ ] **720p / Small Display Scroll**: On smaller viewports (e.g. 1280x720), verify that the drawer body scrolls smoothly (`overflow-y: auto`) so all configuration groups, endpoint rows, and drawer action buttons remain reachable.
+* [ ] **Operational Diagnostics**: Settings shows the log path and logger health. Refresh attempt, observed finish, timeout, and storage-warning statuses match the current log; status updates while Settings remains open and stops after closing.
 * [ ] **Source Badge**:
   * If launched with `--config` or portable `kiosk-config.json`: Displays `Source: CLI / Portable [READ ONLY]`. All inputs, reorder buttons, and "Save Changes" are disabled. "Export Configuration..." is active.
   * If launched with standard defaults/AppData: Inputs are editable and "Save Changes" is enabled.

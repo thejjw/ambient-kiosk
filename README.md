@@ -42,6 +42,7 @@ Instead of using `<iframe>` tags or stripping HTTP security headers via fragile 
 * **[Architecture Specification](docs/ARCHITECTURE.md)**: Deep dive into the desktop architecture comparison (Electron `WebContentsView` vs. Tauri v2 `Webview`), security threat model, auto-tiling grid geometry, and coordinate interpolation motion mechanics.
 * **[Implementation Plan](docs/IMPLEMENTATION_PLAN.md)**: Six-phase engineering roadmap from project scaffolding to tour state machine, UI controls, and performance validation.
 * **[Manual Testing Guide](docs/MANUAL_TESTING.md)**: Runtime verification checklist for 5-feed layout, HUD overlay, hotkeys, settings, and focus management.
+* **[Operational Logging](docs/LOGGING.md)**: Log locations, refresh event meanings, retention, privacy, and debug logging.
 
 ---
 
