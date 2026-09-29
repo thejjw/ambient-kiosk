@@ -10,7 +10,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tracing::Level;
 use tracing_appender::non_blocking::{ErrorCounter, NonBlockingBuilder, WorkerGuard};
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::prelude::*;
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const ARCHIVE_COUNT: usize = 5;
@@ -168,11 +169,7 @@ impl DiagnosticsState {
             .lossy(true)
             .finish(writer);
         let dropped_records = non_blocking.error_counter();
-        let logger_installed = tracing_subscriber::fmt()
-            .json()
-            .with_ansi(false)
-            .with_max_level(requested_level)
-            .with_writer(non_blocking)
+        let logger_installed = build_subscriber(non_blocking, requested_level)
             .try_init()
             .is_ok();
 
@@ -469,6 +466,19 @@ impl DiagnosticsState {
     }
 }
 
+fn build_subscriber<W>(writer: W, max_level: LevelFilter) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'writer> tracing_subscriber::fmt::writer::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_ansi(false)
+            .with_writer(writer)
+            .with_filter(Targets::new().with_target("ambient_kiosk_lib::diagnostics", max_level)),
+    )
+}
+
 fn unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -667,14 +677,10 @@ mod tests {
     fn events_are_single_line_json_with_refresh_fields_and_no_url() {
         let state = test_state();
         let output = SharedWriter(Arc::new(Mutex::new(Vec::new())));
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .with_ansi(false)
-            .with_max_level(LevelFilter::DEBUG)
-            .with_writer(output.clone())
-            .finish();
+        let subscriber = build_subscriber(output.clone(), LevelFilter::DEBUG);
 
         tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "reqwest::connect", hostname = "private.example", ip = "192.0.2.10");
             state.event(
                 Level::INFO,
                 "refresh",
@@ -688,6 +694,8 @@ mod tests {
         assert!(text.ends_with('\n'));
         assert_eq!(text.lines().count(), 1);
         assert!(!text.contains("url"));
+        assert!(!text.contains("private.example"));
+        assert!(!text.contains("192.0.2.10"));
         let record: Value = serde_json::from_str(text.trim()).unwrap();
         let fields = record.get("fields").unwrap_or(&record);
         assert_eq!(fields["schema_version"], 1);

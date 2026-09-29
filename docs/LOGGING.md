@@ -29,7 +29,7 @@ $env:KIOSK_LOG_LEVEL = "debug"
 .\ambient-kiosk.exe
 ```
 
-Debug mode adds event details but does not collect animation frames, cursor polling, or guest-page console output. Persistent records exclude URLs, hostnames, page text, headers, credentials, raw configuration, and exception messages. Refresh records identify feeds by configured endpoint ID and tile index.
+Debug mode adds event details but does not collect animation frames, cursor polling, or guest-page console output. The file logger accepts only Ambient Kiosk diagnostic events; dependency and network-stack records are filtered out even in debug mode. Persistent records exclude URLs, hostnames, page text, headers, credentials, raw configuration, and exception messages. Refresh records identify feeds by configured endpoint ID and tile index.
 
 The logger uses a bounded nonblocking queue. Its Settings health counters report dropped records and file write errors. Orderly application exit flushes queued records; forced termination can leave the last queued records unwritten.
 
