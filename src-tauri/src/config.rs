@@ -1,3 +1,4 @@
+use crate::diagnostics::DiagnosticsState;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -553,7 +554,16 @@ pub fn validate_and_save_config(
 
 /// Retrieves current active configuration and metadata.
 #[tauri::command]
-pub fn get_config(state: State<Arc<AppConfigState>>) -> Result<ConfigMetaResponse, String> {
+pub fn get_config(
+    state: State<Arc<AppConfigState>>,
+    diagnostics: State<Arc<DiagnosticsState>>,
+) -> Result<ConfigMetaResponse, String> {
+    diagnostics.event(
+        tracing::Level::INFO,
+        "configuration",
+        "configuration_read",
+        serde_json::json!({}),
+    );
     Ok(state.get_meta())
 }
 
@@ -562,15 +572,59 @@ pub fn get_config(state: State<Arc<AppConfigState>>) -> Result<ConfigMetaRespons
 pub fn save_config(
     new_config: KioskConfig,
     state: State<Arc<AppConfigState>>,
+    diagnostics: State<Arc<DiagnosticsState>>,
 ) -> Result<(), String> {
-    validate_and_save_config(&state, new_config)
+    let endpoint_count = new_config.endpoints.len();
+    match validate_and_save_config(&state, new_config) {
+        Ok(()) => {
+            diagnostics.event(
+                tracing::Level::INFO,
+                "configuration",
+                "configuration_saved",
+                serde_json::json!({ "endpoint_count": endpoint_count }),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            diagnostics.event(
+                tracing::Level::WARN,
+                "configuration",
+                "configuration_save_failed",
+                serde_json::json!({ "category": "validation_or_write_failure" }),
+            );
+            Err(error)
+        }
+    }
 }
 
 /// Exports configuration to an arbitrary user-specified destination path.
 #[tauri::command]
-pub fn export_config(config: KioskConfig, destination_path: String) -> Result<(), String> {
+pub fn export_config(
+    config: KioskConfig,
+    destination_path: String,
+    diagnostics: State<Arc<DiagnosticsState>>,
+) -> Result<(), String> {
     let target = PathBuf::from(destination_path);
-    write_config_atomic(&target, &config)
+    match write_config_atomic(&target, &config) {
+        Ok(()) => {
+            diagnostics.event(
+                tracing::Level::INFO,
+                "configuration",
+                "configuration_exported",
+                serde_json::json!({ "endpoint_count": config.endpoints.len() }),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            diagnostics.event(
+                tracing::Level::WARN,
+                "configuration",
+                "configuration_export_failed",
+                serde_json::json!({ "category": "write_failure" }),
+            );
+            Err(error)
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------

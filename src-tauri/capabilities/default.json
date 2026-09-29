@@ -25,6 +25,8 @@
     "allow-prev-tile",
     "allow-toggle-fullscreen",
     "allow-minimize-current",
-    "allow-get-tour-status"
+    "allow-get-tour-status",
+    "allow-get-diagnostics",
+    "allow-report-frontend-error"
   ]
 }

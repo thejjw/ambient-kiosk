@@ -13,6 +13,8 @@ fn main() {
             "toggle_fullscreen",
             "minimize_current",
             "get_tour_status",
+            "get_diagnostics",
+            "report_frontend_error",
         ]),
     ))
     .expect("failed to run tauri build");

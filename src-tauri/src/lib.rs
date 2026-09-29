@@ -21,7 +21,10 @@ fn get_kiosk_shortcuts() -> [Shortcut; 6] {
     ]
 }
 
-async fn unregister_kiosk_shortcuts_bounded(app: &tauri::AppHandle) -> bool {
+async fn unregister_kiosk_shortcuts_bounded(
+    app: &tauri::AppHandle,
+    diagnostics: &diagnostics::DiagnosticsState,
+) -> bool {
     for attempt in 1..=3 {
         if app.global_shortcut().unregister_all().is_ok() {
             return true;
@@ -31,7 +34,12 @@ async fn unregister_kiosk_shortcuts_bounded(app: &tauri::AppHandle) -> bool {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
     }
-    eprintln!("[Shortcuts] CRITICAL: unregister_kiosk_shortcuts failed after 3 bounded retries");
+    diagnostics.event(
+        tracing::Level::ERROR,
+        "shortcuts",
+        "shortcut_unregister_failed",
+        serde_json::json!({ "attempts": 3 }),
+    );
     false
 }
 struct FocusShortcutManager {
@@ -46,21 +54,34 @@ struct HudInteractionState {
 
 // Keep the overlay in the main window's physical client coordinates at every DPI.
 fn align_hud(app: &tauri::AppHandle, settings_open: bool) -> Result<(), String> {
-    let main = app.get_window("main").ok_or("Main window is unavailable")?;
-    let hud = app
-        .get_window("hud-overlay")
-        .ok_or("HUD window is unavailable")?;
-    let origin = main.inner_position().map_err(|e| e.to_string())?;
-    let size = main.inner_size().map_err(|e| e.to_string())?;
-    let scale = main.scale_factor().map_err(|e| e.to_string())?;
-    let height = if settings_open {
-        size.height.min((900.0 * scale).round() as u32)
-    } else {
-        (48.0 * scale).round() as u32
-    };
-    hud.set_position(origin).map_err(|e| e.to_string())?;
-    hud.set_size(PhysicalSize::new(size.width, height.max(1)))
-        .map_err(|e| e.to_string())
+    let result = (|| {
+        let main = app.get_window("main").ok_or("Main window is unavailable")?;
+        let hud = app
+            .get_window("hud-overlay")
+            .ok_or("HUD window is unavailable")?;
+        let origin = main.inner_position().map_err(|e| e.to_string())?;
+        let size = main.inner_size().map_err(|e| e.to_string())?;
+        let scale = main.scale_factor().map_err(|e| e.to_string())?;
+        let height = if settings_open {
+            size.height.min((900.0 * scale).round() as u32)
+        } else {
+            (48.0 * scale).round() as u32
+        };
+        hud.set_position(origin).map_err(|e| e.to_string())?;
+        hud.set_size(PhysicalSize::new(size.width, height.max(1)))
+            .map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        if let Some(diagnostics) = app.try_state::<Arc<diagnostics::DiagnosticsState>>() {
+            diagnostics.event(
+                tracing::Level::WARN,
+                "hud",
+                "hud_alignment_failed",
+                serde_json::json!({ "settings_open": settings_open }),
+            );
+        }
+    }
+    result
 }
 
 /// Change drawer interaction only from the trusted HUD webview.
@@ -69,17 +90,36 @@ fn set_settings_open(
     webview_window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<HudInteractionState>>,
+    diagnostics: tauri::State<'_, Arc<diagnostics::DiagnosticsState>>,
     open: bool,
 ) -> Result<(), String> {
     if webview_window.label() != "hud-overlay" {
         return Err("Only the HUD can change settings state".into());
     }
     align_hud(&app, open)?;
-    app.get_window("hud-overlay")
-        .ok_or("HUD window is unavailable")?
-        .set_ignore_cursor_events(false)
-        .map_err(|e| e.to_string())?;
+    let hud = app
+        .get_window("hud-overlay")
+        .ok_or("HUD window is unavailable")?;
+    if let Err(error) = hud.set_ignore_cursor_events(false) {
+        diagnostics.event(
+            tracing::Level::WARN,
+            "hud",
+            "settings_interaction_enable_failed",
+            serde_json::json!({}),
+        );
+        return Err(error.to_string());
+    }
     state.settings_open.store(open, Ordering::SeqCst);
+    diagnostics.event(
+        tracing::Level::INFO,
+        "settings",
+        if open {
+            "settings_opened"
+        } else {
+            "settings_closed"
+        },
+        serde_json::json!({}),
+    );
     let focused = app
         .get_window("main")
         .and_then(|w| w.is_focused().ok())
@@ -144,9 +184,8 @@ pub fn run() {
                                 let _ = hud.show();
                             }
                         }
-                        let _ = shortcut_tx_cb.send(
-                            !minimized && !hud_state_cb.settings_open.load(Ordering::SeqCst),
-                        );
+                        let _ = shortcut_tx_cb
+                            .send(!minimized && !hud_state_cb.settings_open.load(Ordering::SeqCst));
                     } else {
                         // Focus lost: debounce 150ms and re-query OS focus before requesting unregister
                         let app_handle_delayed = app_handle.clone();
@@ -242,7 +281,11 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Destroyed if label == "main" => {
-                    if let Some(diagnostics) = app_handle.try_state::<Arc<diagnostics::DiagnosticsState>>() {
+                    if let Some(controller) = app_handle.try_state::<Arc<tour::TourController>>() {
+                        controller.inner().shutdown();
+                    } else if let Some(diagnostics) =
+                        app_handle.try_state::<Arc<diagnostics::DiagnosticsState>>()
+                    {
                         diagnostics.shutdown();
                     }
                     app_handle.exit(0);
@@ -265,8 +308,21 @@ pub fn run() {
                 cli_config_path.as_deref(),
                 exe_path.as_deref(),
                 &app_data_dir,
-            )
-            .map_err(|e| format!("Failed to initialize kiosk configuration: {}", e))?;
+            );
+            let meta = match meta {
+                Ok(meta) => meta,
+                Err(error) => {
+                    diagnostics.event(
+                        tracing::Level::ERROR,
+                        "configuration",
+                        "configuration_load_failed",
+                        serde_json::json!({ "category": "invalid_or_unreadable" }),
+                    );
+                    return Err(
+                        format!("Failed to initialize kiosk configuration: {}", error).into(),
+                    );
+                }
+            };
 
             let cfg = meta.config.clone();
             diagnostics.event(
@@ -280,7 +336,10 @@ pub fn run() {
                 }),
             );
             diagnostics.set_feeds(
-                &cfg.endpoints.iter().map(|endpoint| endpoint.id.clone()).collect::<Vec<_>>(),
+                &cfg.endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.id.clone())
+                    .collect::<Vec<_>>(),
                 cfg.network_dns.adblock_dns_enabled,
             );
             let config_state = Arc::new(config::AppConfigState::new(meta, app_data_dir));
@@ -288,12 +347,39 @@ pub fn run() {
 
             // 1. Start loopback proxy if adblock DNS is active
             let proxy_port = if cfg.network_dns.adblock_dns_enabled {
-                let p = tauri::async_runtime::block_on(async {
-                    proxy::start_adguard_proxy(cfg.network_dns.clone()).await
-                })
-                .map_err(|e| format!("Failed to start AdGuard proxy: {}", e))?;
+                let start_result = tauri::async_runtime::block_on(async {
+                    proxy::start_adguard_proxy_with_diagnostics(
+                        cfg.network_dns.clone(),
+                        Some(diagnostics.clone()),
+                    )
+                    .await
+                });
+                let p = match start_result {
+                    Ok(port) => port,
+                    Err(error) => {
+                        diagnostics.event(
+                            tracing::Level::ERROR,
+                            "proxy",
+                            "proxy_start_failed",
+                            serde_json::json!({ "category": "bind_failed" }),
+                        );
+                        return Err(format!("Failed to start AdGuard proxy: {}", error).into());
+                    }
+                };
+                diagnostics.event(
+                    tracing::Level::INFO,
+                    "proxy",
+                    "proxy_started",
+                    serde_json::json!({ "enabled": true }),
+                );
                 Some(p)
             } else {
+                diagnostics.event(
+                    tracing::Level::INFO,
+                    "proxy",
+                    "proxy_disabled",
+                    serde_json::json!({}),
+                );
                 None
             };
 
@@ -331,6 +417,7 @@ pub fn run() {
                 &rects,
                 proxy_port,
                 page_load_tx,
+                diagnostics.clone(),
             )?;
 
             // 4. Initialize TourController and start background tour cycle
@@ -342,6 +429,7 @@ pub fn run() {
                 win_width,
                 win_height,
                 tiles,
+                diagnostics.clone(),
             );
             app.manage(tour_controller.clone());
 
@@ -389,6 +477,7 @@ pub fn run() {
 
             // 6. Spawn sequential shortcut reconciler actor
             let app_handle_for_actor = app.handle().clone();
+            let diagnostics_for_actor = diagnostics.clone();
             tauri::async_runtime::spawn(async move {
                 let mut currently_registered = false;
 
@@ -401,21 +490,34 @@ pub fn run() {
                         let mut reg_failed = false;
                         for s in get_kiosk_shortcuts() {
                             if let Err(e) = app_handle_for_actor.global_shortcut().register(s) {
-                                eprintln!("[Shortcuts] Failed to register shortcut {:?}: {}", s, e);
+                                let _ = e;
+                                diagnostics_for_actor.event(
+                                    tracing::Level::WARN,
+                                    "shortcuts",
+                                    "shortcut_register_failed",
+                                    serde_json::json!({ "shortcut": format!("{:?}", s) }),
+                                );
                                 reg_failed = true;
                                 break;
                             }
                         }
                         if reg_failed {
-                            let cleaned =
-                                unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await;
+                            let cleaned = unregister_kiosk_shortcuts_bounded(
+                                &app_handle_for_actor,
+                                &diagnostics_for_actor,
+                            )
+                            .await;
                             currently_registered = !cleaned;
                         } else {
                             currently_registered = true;
                         }
                     } else if !desired
                         && currently_registered
-                        && unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await
+                        && unregister_kiosk_shortcuts_bounded(
+                            &app_handle_for_actor,
+                            &diagnostics_for_actor,
+                        )
+                        .await
                     {
                         currently_registered = false;
                     }
@@ -538,6 +640,8 @@ pub fn run() {
             tour::toggle_fullscreen,
             tour::minimize_current,
             tour::get_tour_status,
+            diagnostics::get_diagnostics,
+            diagnostics::report_frontend_error,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

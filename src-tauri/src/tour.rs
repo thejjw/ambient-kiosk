@@ -1,4 +1,5 @@
 use crate::config::TimingConfig;
+use crate::diagnostics::DiagnosticsState;
 use crate::webview_manager::ManagedWebviewTile;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -158,6 +159,19 @@ impl TourStateMachine {
         }
 
         (target, transition_duration)
+    }
+
+    /// Clears refresh tracking only when it still belongs to the expected generation.
+    pub fn cancel_pending_reload(&self, expected_gen: u64) -> Option<usize> {
+        let mut data = self.state.lock();
+        if data.pending_reload == Some((data.candidate_index, expected_gen)) {
+            let index = data.candidate_index;
+            data.pending_reload = None;
+            data.candidate_reload_finished = false;
+            Some(index)
+        } else {
+            None
+        }
     }
 
     /// Completes Maximizing and enters MaximizedSingleSite hold.
@@ -330,6 +344,7 @@ pub struct TourController {
     pub window_geometry: Mutex<(f64, f64)>,
     pub geometry_generation: AtomicU64,
     pub tiles: Vec<ManagedWebviewTile>,
+    pub diagnostics: Arc<DiagnosticsState>,
     pub is_running: AtomicBool,
     pub should_exit: AtomicBool,
 }
@@ -343,6 +358,7 @@ impl TourController {
         window_width: f64,
         window_height: f64,
         tiles: Vec<ManagedWebviewTile>,
+        diagnostics: Arc<DiagnosticsState>,
     ) -> Arc<Self> {
         let total = tiles.len();
         Arc::new(Self {
@@ -353,6 +369,7 @@ impl TourController {
             window_geometry: Mutex::new((window_width, window_height)),
             geometry_generation: AtomicU64::new(1),
             tiles,
+            diagnostics,
             is_running: AtomicBool::new(false),
             should_exit: AtomicBool::new(false),
         })
@@ -361,23 +378,49 @@ impl TourController {
     pub fn emit_status(&self) {
         let titles: Vec<String> = self.tiles.iter().map(|t| t.title.clone()).collect();
         let payload = self.machine.get_status_payload(&titles);
+        if let Some(index) = payload.active_index {
+            self.diagnostics
+                .set_tour_state(format!("{:?}", payload.state), index);
+        }
         // Strictly target HUD overlay window, never guest webviews
         let _ = self
             .app_handle
             .emit_to("hud-overlay", "tour-status-update", payload);
     }
     pub fn start(&self) {
+        self.start_with_trigger("command");
+    }
+
+    fn start_with_trigger(&self, trigger: &str) {
+        self.diagnostics.event(
+            tracing::Level::INFO,
+            "tour",
+            "tour_start_requested",
+            serde_json::json!({ "trigger": trigger }),
+        );
         self.is_running.store(true, Ordering::SeqCst);
         self.machine.start();
         self.emit_status();
     }
 
     pub fn pause(&self) {
+        self.diagnostics.event(
+            tracing::Level::INFO,
+            "tour",
+            "tour_pause_requested",
+            serde_json::json!({}),
+        );
         self.machine.pause();
         self.emit_status();
     }
 
     pub fn resume(&self) {
+        self.diagnostics.event(
+            tracing::Level::INFO,
+            "tour",
+            "tour_resume_requested",
+            serde_json::json!({}),
+        );
         self.machine.resume();
         self.emit_status();
     }
@@ -386,6 +429,7 @@ impl TourController {
         if self.tiles.is_empty() {
             return;
         }
+        self.cancel_pending_reload("manual_navigation");
         let (target, transition_duration) = self.machine.begin_maximizing(target_idx);
 
         // Sibling-hide fallback: hide all inactive sibling webviews
@@ -448,16 +492,23 @@ impl TourController {
         self.emit_status();
     }
 
-    pub fn transition_to_minimizing(&self, target_idx: usize) {
+    pub fn transition_to_minimizing(&self, target_idx: usize, trigger: &str) {
         if self.tiles.is_empty() {
             return;
         }
+        self.cancel_pending_reload("superseded");
         let (target, candidate, gen, transition_duration) =
             self.machine.begin_minimizing(target_idx);
         self.emit_status();
 
-        // Trigger native reload paired with this exact generation token
-        let _ = self.tiles[candidate].trigger_reload(gen);
+        // Record before dispatch so a fast load cannot finish before it is visible to diagnostics.
+        self.diagnostics.begin_refresh(candidate, gen, trigger);
+        let dispatch_failed = self.tiles[candidate].trigger_reload(gen).is_err();
+        if dispatch_failed {
+            self.tiles[candidate].cancel_reload(gen);
+            self.diagnostics
+                .finish_refresh(gen, "dispatch_failed", Some("native_reload_error"));
+        }
 
         // Interpolate back to resting slot
         let anim_gen = self.geometry_generation.load(Ordering::SeqCst);
@@ -510,21 +561,112 @@ impl TourController {
         }
 
         self.machine.finish_minimizing();
+        if dispatch_failed {
+            self.on_preparing_timeout(gen);
+        }
         self.emit_status();
     }
-    pub fn on_page_load_finished(&self, loaded_index: usize, event_gen: u64) {
-        if self.machine.on_page_load_finished(loaded_index, event_gen) {
-            self.emit_status();
+    /// Applies a page load callback while keeping refresh correlation best effort.
+    pub fn on_page_load_observation(
+        &self,
+        loaded_index: usize,
+        observation: crate::webview_manager::PageLoadObservation,
+    ) {
+        use crate::webview_manager::PageLoadObservation;
+        match observation {
+            PageLoadObservation::Started {
+                generation: Some(generation),
+            } => self
+                .diagnostics
+                .observe_refresh_started(loaded_index, Some(generation)),
+            PageLoadObservation::Started { generation: None } => {
+                if let Some(tile) = self.tiles.get(loaded_index) {
+                    self.diagnostics.event(
+                        tracing::Level::DEBUG,
+                        "webview",
+                        "page_load_started",
+                        serde_json::json!({ "endpoint_id": tile.id, "tile_index": loaded_index }),
+                    );
+                }
+            }
+            PageLoadObservation::Finished {
+                generation: Some(generation),
+            } => {
+                let accepted =
+                    self.machine.state.lock().pending_reload == Some((loaded_index, generation));
+                if accepted {
+                    self.diagnostics
+                        .finish_refresh(generation, "finish_observed", None);
+                } else {
+                    self.diagnostics.event(
+                        tracing::Level::DEBUG,
+                        "refresh",
+                        "refresh_finish_ignored",
+                        serde_json::json!({ "tile_index": loaded_index, "attempt_id": generation }),
+                    );
+                }
+                if self.machine.on_page_load_finished(loaded_index, generation) {
+                    self.emit_status();
+                }
+            }
+            PageLoadObservation::Finished { generation: None } => {
+                if let Some(tile) = self.tiles.get(loaded_index) {
+                    self.diagnostics.event(
+                        tracing::Level::DEBUG,
+                        "webview",
+                        "page_load_finished",
+                        serde_json::json!({ "endpoint_id": tile.id, "tile_index": loaded_index }),
+                    );
+                }
+            }
+            PageLoadObservation::Ignored => {}
         }
     }
 
+    fn cancel_pending_reload(&self, reason: &str) {
+        let pending = self.machine.state.lock().pending_reload;
+        if let Some((index, generation)) = pending {
+            if self.machine.cancel_pending_reload(generation).is_some() {
+                if let Some(tile) = self.tiles.get(index) {
+                    tile.cancel_reload(generation);
+                }
+                self.diagnostics
+                    .finish_refresh(generation, "tracking_cancelled", Some(reason));
+            }
+        }
+    }
+
+    /// Retires pending refresh tracking and flushes operational logs before process exit.
+    pub fn shutdown(&self) {
+        self.cancel_pending_reload("shutdown");
+        self.diagnostics.shutdown();
+    }
+
     pub fn on_preparing_timeout(&self, expected_gen: u64) {
+        let pending = self.machine.state.lock().pending_reload;
+        if let Some((index, generation)) =
+            pending.filter(|(_, generation)| *generation == expected_gen)
+        {
+            if self.machine.cancel_pending_reload(generation).is_some() {
+                if let Some(tile) = self.tiles.get(index) {
+                    tile.cancel_reload(generation);
+                }
+                self.diagnostics
+                    .finish_refresh(generation, "wait_timed_out", None);
+            }
+        }
         if self.machine.on_preparing_timeout(expected_gen).is_some() {
             self.emit_status();
         }
     }
 
     pub fn next(&self) {
+        self.diagnostics.event(
+            tracing::Level::INFO,
+            "tour",
+            "next_tile_requested",
+            serde_json::json!({}),
+        );
         let next_idx = {
             let data = self.machine.state.lock();
             (data.active_index + 1) % self.tiles.len().max(1)
@@ -533,6 +675,12 @@ impl TourController {
     }
 
     pub fn prev(&self) {
+        self.diagnostics.event(
+            tracing::Level::INFO,
+            "tour",
+            "previous_tile_requested",
+            serde_json::json!({}),
+        );
         let prev_idx = {
             let data = self.machine.state.lock();
             if data.active_index == 0 {
@@ -550,7 +698,13 @@ impl TourController {
             (data.current_state, data.active_index)
         };
         if state == TourStateName::MaximizedSingleSite || state == TourStateName::Maximizing {
-            self.transition_to_minimizing(active);
+            self.diagnostics.event(
+                tracing::Level::INFO,
+                "tour",
+                "minimize_requested",
+                serde_json::json!({ "trigger": "manual_minimize" }),
+            );
+            self.transition_to_minimizing(active, "manual_minimize");
         }
     }
 
@@ -599,20 +753,26 @@ impl TourController {
 
 pub fn start_tour_loop(
     controller: Arc<TourController>,
-    mut page_load_rx: UnboundedReceiver<(usize, u64)>,
+    mut page_load_rx: UnboundedReceiver<(usize, crate::webview_manager::PageLoadObservation)>,
     auto_start: bool,
 ) {
     if auto_start {
-        controller.start();
+        controller.start_with_trigger("auto_start");
     }
 
     tauri::async_runtime::spawn(async move {
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut health_interval = tokio::time::interval(Duration::from_secs(60));
+        health_interval.tick().await;
 
         loop {
             tokio::select! {
-                Some((idx, event_gen)) = page_load_rx.recv() => {
-                    controller.on_page_load_finished(idx, event_gen);
+                Some((idx, observation)) = page_load_rx.recv() => {
+                    controller.on_page_load_observation(idx, observation);
+                }
+
+                _ = health_interval.tick() => {
+                    controller.diagnostics.record_health_summary();
                 }
 
                 _ = tick_interval.tick() => {
@@ -653,7 +813,7 @@ pub fn start_tour_loop(
                             if elapsed >= target_duration {
                                 let ctrl = controller.clone();
                                 tokio::task::spawn_blocking(move || {
-                                    ctrl.transition_to_minimizing(active);
+                                    ctrl.transition_to_minimizing(active, "tour_advance");
                                 });
                             }
                         }
@@ -707,6 +867,14 @@ pub fn toggle_fullscreen(app_handle: AppHandle) -> Result<(), String> {
     if let Some(win) = app_handle.get_window("main") {
         let is_fs = win.is_fullscreen().unwrap_or(false);
         win.set_fullscreen(!is_fs).map_err(|e| e.to_string())?;
+        if let Some(diagnostics) = app_handle.try_state::<Arc<DiagnosticsState>>() {
+            diagnostics.event(
+                tracing::Level::INFO,
+                "window",
+                "fullscreen_toggled",
+                serde_json::json!({ "fullscreen": !is_fs }),
+            );
+        }
     }
     Ok(())
 }
@@ -798,6 +966,26 @@ mod tests {
         assert_eq!(machine.state.lock().current_state, TourStateName::GridView);
         assert_eq!(machine.state.lock().pending_reload, None);
         assert_eq!(machine.state.lock().candidate_index, 1);
+    }
+
+    #[test]
+    fn test_cancelled_generation_cannot_clear_newer_reload() {
+        let machine = TourStateMachine::new(TimingConfig::default(), 3);
+        let (_, first_candidate, first_gen, _) = machine.begin_minimizing(0);
+        let (_, second_candidate, second_gen, _) = machine.begin_minimizing(1);
+
+        assert_ne!(first_gen, second_gen);
+        assert_eq!(machine.cancel_pending_reload(first_gen), None);
+        assert_eq!(
+            machine.state.lock().pending_reload,
+            Some((second_candidate, second_gen))
+        );
+        assert_eq!(
+            machine.cancel_pending_reload(second_gen),
+            Some(second_candidate)
+        );
+        assert_eq!(machine.state.lock().pending_reload, None);
+        assert_eq!(first_candidate, 1);
     }
 
     #[test]
