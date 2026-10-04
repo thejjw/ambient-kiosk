@@ -136,6 +136,137 @@ function formatUptime(seconds: number): string {
   return hours > 0 ? `${hours}h ${minutes}m` : minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
 }
 
+/// Connects trusted HUD window actions and keeps close confirmation keyboard-accessible.
+export function initWindowControls(
+  dispatch: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
+  onDialogChange: (open: boolean) => void,
+  onErrorChange: (shown: boolean) => void = () => {},
+) {
+  const minimize = document.getElementById("btn-minimize-app") as HTMLButtonElement;
+  const close = document.getElementById("btn-close-app") as HTMLButtonElement;
+  const dialog = document.getElementById("close-confirmation")!;
+  const cancel = document.getElementById("btn-cancel-close") as HTMLButtonElement;
+  const confirm = document.getElementById("btn-confirm-close") as HTMLButtonElement;
+  const error = document.getElementById("window-action-error")!;
+  const dialogError = document.getElementById("close-dialog-error")!;
+  const background = [document.getElementById("hud-overlay")!, document.getElementById("settings-drawer")!];
+  let open = false;
+  let resolving = false;
+  let requesting = false;
+  let previousFocus: HTMLElement | null = null;
+  let previousInert: boolean[] = [];
+
+  function setWindowError(message?: string) {
+    error.textContent = message ?? "";
+    error.hidden = !message;
+    onErrorChange(Boolean(message));
+  }
+
+  // Opens one backend-requested confirmation and preserves background focus.
+  function showConfirmation() {
+    if (open) return;
+    previousFocus = document.activeElement as HTMLElement | null;
+    previousInert = background.map((element) => element.inert);
+    background.forEach((element) => { element.inert = true; });
+    open = true;
+    dialog.hidden = false;
+    setWindowError();
+    dialogError.hidden = true;
+    onDialogChange(true);
+    cancel.focus();
+  }
+
+  async function resolve(confirmed: boolean) {
+    if (!open || resolving) return;
+    resolving = true;
+    cancel.disabled = confirm.disabled = true;
+    dialogError.hidden = true;
+    let confirmedClose = false;
+    try {
+      await dispatch("resolve_close_app", { confirmed });
+      confirmedClose = confirmed;
+      if (!confirmed) {
+        open = false;
+        dialog.hidden = true;
+        background.forEach((element, index) => { element.inert = previousInert[index]; });
+        onDialogChange(false);
+        if (previousFocus?.isConnected) previousFocus.focus();
+      }
+    } catch {
+      dialogError.textContent = confirmed ? "Could not close the app. Try again or cancel." : "Could not cancel closing. Try again.";
+      dialogError.hidden = false;
+    } finally {
+      // A successful close remains locked until the native window exits.
+      if (!confirmedClose) {
+        resolving = false;
+        cancel.disabled = confirm.disabled = false;
+        if (open) cancel.focus();
+      }
+    }
+  }
+
+  const onMinimize = async () => {
+    if (minimize.disabled || open) return;
+    minimize.disabled = true;
+    setWindowError();
+    try { await dispatch("minimize_app"); }
+    catch {
+      setWindowError("Could not minimize the app. Try again.");
+    } finally { minimize.disabled = false; }
+  };
+  const onClose = async () => {
+    if (requesting || open) return;
+    requesting = true;
+    close.disabled = true;
+    setWindowError();
+    try { await dispatch("request_close_app"); }
+    catch {
+      setWindowError("Could not open close confirmation. Try again.");
+    } finally { requesting = false; close.disabled = false; }
+  };
+  const onCancel = () => { void resolve(false); };
+  const onConfirm = () => { void resolve(true); };
+  const onKeydown = (event: KeyboardEvent) => {
+    if (!open) return;
+    // Stop the drawer Escape handler and any tour shortcuts while modal.
+    event.stopImmediatePropagation();
+    if (event.code === "Escape" || event.key === "Escape") {
+      event.preventDefault();
+      void resolve(false);
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      if (!resolving) {
+        (document.activeElement === cancel ? confirm : cancel).focus();
+      }
+    }
+  };
+  const onFocus = (event: FocusEvent) => {
+    if (open && !dialog.contains(event.target as Node) && !resolving) cancel.focus();
+  };
+  minimize.addEventListener("click", onMinimize);
+  close.addEventListener("click", onClose);
+  cancel.addEventListener("click", onCancel);
+  confirm.addEventListener("click", onConfirm);
+  window.addEventListener("keydown", onKeydown, true);
+  window.addEventListener("focusin", onFocus);
+  return {
+    showConfirmation,
+    // Exposes modal visibility to the existing HUD auto-hide timer.
+    isOpen: () => open,
+    // Keeps actionable failure feedback visible until the operator retries.
+    isErrorVisible: () => !error.hidden,
+    /// Releases DOM listeners when a HUD instance is destroyed.
+    dispose() {
+      minimize.removeEventListener("click", onMinimize);
+      close.removeEventListener("click", onClose);
+      cancel.removeEventListener("click", onCancel);
+      confirm.removeEventListener("click", onConfirm);
+      window.removeEventListener("keydown", onKeydown, true);
+      window.removeEventListener("focusin", onFocus);
+    },
+  };
+}
+
 export function bootstrapApp() {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     return;
@@ -147,6 +278,8 @@ export function bootstrapApp() {
     // Main coordinator window only hosts child webviews
     document.getElementById("hud-overlay")?.remove();
     document.getElementById("settings-drawer")?.remove();
+    document.getElementById("close-confirmation")?.remove();
+    document.getElementById("window-action-error")?.remove();
   } else {
     initHudWindow();
   }
@@ -178,6 +311,23 @@ function initHudWindow() {
   let hudTimeout: number | null = null;
   let diagnosticsTimer: number | null = null;
   let diagnosticsLoading = false;
+  let restoreHudHidden = false;
+  const windowControls = initWindowControls(invoke, (open) => {
+    if (open) {
+      restoreHudHidden = hudOverlay.classList.contains("hidden");
+      showHud();
+    } else if (restoreHudHidden && settingsDrawer.classList.contains("hidden")) {
+      hudOverlay.classList.add("hidden");
+    } else scheduleHideHud();
+  }, (shown) => {
+    if (shown) showHud();
+    else scheduleHideHud();
+  });
+  // Reconcile after registration so an early native close cannot lose its dialog.
+  void listen("app-close-confirmation", () => windowControls.showConfirmation())
+    .then(async () => {
+      if (await invoke<boolean>("get_close_pending")) windowControls.showConfirmation();
+    }).catch(() => reportFrontendError("promise_rejection"));
 
   window.addEventListener("error", () => reportFrontendError("window_error"));
   window.addEventListener("unhandledrejection", () => reportFrontendError("promise_rejection"));
@@ -193,7 +343,7 @@ function initHudWindow() {
   function scheduleHideHud() {
     if (hudTimeout) clearTimeout(hudTimeout);
     hudTimeout = window.setTimeout(() => {
-      if (settingsDrawer.classList.contains("hidden")) {
+      if (settingsDrawer.classList.contains("hidden") && !windowControls.isOpen() && !windowControls.isErrorVisible()) {
         hudOverlay.classList.add("hidden");
       }
     }, 2500);
@@ -391,7 +541,7 @@ function initHudWindow() {
 
   // Listen to native cursor tracking visibility event from backend
   listen<boolean>("hud-visibility", (event) => {
-    if (event.payload || !settingsDrawer.classList.contains("hidden")) {
+    if (event.payload || !settingsDrawer.classList.contains("hidden") || windowControls.isOpen() || windowControls.isErrorVisible()) {
       showHud();
     } else {
       scheduleHideHud();

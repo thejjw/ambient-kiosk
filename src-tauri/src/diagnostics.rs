@@ -72,6 +72,7 @@ pub struct DiagnosticsState {
     writer_health: Arc<WriterHealth>,
     dropped_records: ErrorCounter,
     worker_guard: Mutex<Option<WorkerGuard>>,
+    shutdown_started: AtomicBool,
     feeds: Mutex<Vec<FeedRefreshStatus>>,
     pending_refresh: Mutex<Option<RefreshAttempt>>,
     tour_state: Mutex<String>,
@@ -181,6 +182,7 @@ impl DiagnosticsState {
             writer_health,
             dropped_records,
             worker_guard: Mutex::new(Some(guard)),
+            shutdown_started: AtomicBool::new(false),
             feeds: Mutex::new(Vec::new()),
             pending_refresh: Mutex::new(None),
             tour_state: Mutex::new("Stopped".into()),
@@ -453,6 +455,9 @@ impl DiagnosticsState {
 
     /// Records that the process is shutting down and keeps the nonblocking worker alive to flush.
     pub fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
         if let Some(attempt) = self.pending_refresh.lock().take() {
             self.finish_refresh_attempt(attempt, "tracking_cancelled", "shutdown");
         }
@@ -641,6 +646,7 @@ mod tests {
             writer_health: health,
             dropped_records,
             worker_guard: Mutex::new(Some(guard)),
+            shutdown_started: AtomicBool::new(false),
             feeds: Mutex::new(Vec::new()),
             pending_refresh: Mutex::new(None),
             tour_state: Mutex::new("Stopped".into()),
@@ -761,6 +767,12 @@ mod tests {
         state.set_feeds(&["feed-1".into()], false);
         state.begin_refresh(0, 42, "tour_advance");
         state.shutdown();
+        let shutdown_sequence = state.event_sequence.load(Ordering::Relaxed);
+        state.shutdown();
+        assert_eq!(
+            state.event_sequence.load(Ordering::Relaxed),
+            shutdown_sequence
+        );
         state.finish_refresh(42, "finish_observed", None);
 
         let snapshot = state.snapshot();

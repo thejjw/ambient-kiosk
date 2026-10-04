@@ -50,6 +50,9 @@ open "ambient-kiosk/src-tauri/target/debug/bundle/macos/Ambient Kiosk.app"
 ---
 
 ### D. Keyboard Hotkeys & Controls
+* [ ] **Window Controls**: Reveal the HUD and verify Minimize and Close remain reachable with Settings open, at 720p, and at scaled DPI. Minimize hides both windows; taskbar restore preserves Settings edits, fullscreen, and pause state.
+* [ ] **Close Confirmation**: HUD Close and native close (including Alt+F4 with either window focused) show one confirmation. Cancel receives focus; Tab stays inside the dialog; Escape cancels without closing Settings or losing edits. Tour shortcuts are suspended while confirmation is open.
+* [ ] **Clean Exit**: Confirm Close exits both windows and writes one shutdown log record. Pending refreshes end with tracking_cancelled / shutdown, and queued records are flushed. Cancel and retry remain usable after action errors.
 * [ ] **`Space` (Play / Pause)**: Press `Space` to pause the tour. The play/pause button icon toggles to `▶`, and the countdown progress bar freezes. Press `Space` again to resume (button icon returns to `⏸`).
 * [ ] **`ArrowRight` (Next Tile)**: Press `ArrowRight` to advance directly to the next tile in the tour.
 * [ ] **`ArrowLeft` (Previous Tile)**: Press `ArrowLeft` to return to the previous tile.

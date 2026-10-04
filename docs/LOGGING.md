@@ -33,6 +33,8 @@ Debug mode adds event details but does not collect animation frames, cursor poll
 
 The logger uses a bounded nonblocking queue. Its Settings health counters report dropped records and file write errors. Orderly application exit flushes queued records; forced termination can leave the last queued records unwritten.
 
+Window controls record `minimize_requested`, `close_requested`, `close_cancelled`, and `close_confirmed` under the `window` component. A confirmed close follows normal shutdown and flushes the log. Cancel leaves the application running. Failed window actions emit sanitized warning events such as `minimize_failed`, `close_confirmation_failed`, `close_cancel_failed`, and `close_failed`.
+
 ## Not included
 
 This logging feature observes the current tour-triggered reload behavior. `reload_interval_minutes` and `refresh_before_maximize` still do not schedule reloads. Per-feed scheduling, pause interaction, and verification that website content actually changed remain future work.

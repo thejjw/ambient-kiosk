@@ -12,7 +12,7 @@ const globalScope = globalThis as unknown as {
 globalScope.window = happyWindow;
 globalScope.document = happyDoc;
 
-import { createEndpointRowElement, renderEndpointsList, renderDiagnostics, EndpointItem, DiagnosticsSnapshot } from "./main";
+import { createEndpointRowElement, renderEndpointsList, renderDiagnostics, initWindowControls, EndpointItem, DiagnosticsSnapshot } from "./main";
 
 describe("Endpoint UI Security & Validation", () => {
   beforeEach(() => {
@@ -162,5 +162,109 @@ describe("Operational diagnostics UI", () => {
     expect(happyDoc.getElementById("diagnostics-feeds")?.textContent).toContain("Not attempted this session");
     expect(happyDoc.getElementById("diagnostics-feeds")?.textContent).toContain(snapshot.feeds[0].endpoint_id);
     expect(happyDoc.querySelector("#diagnostics-feeds img")).toBeNull();
+  });
+});
+
+describe("HUD window controls", () => {
+  beforeEach(() => {
+    happyDoc.body.innerHTML = `
+      <div id="hud-overlay"><button id="btn-minimize-app"></button><button id="btn-close-app"></button></div>
+      <div id="settings-drawer"><input id="unsaved" value="keep my edit"></div>
+      <div id="window-action-error" hidden></div>
+      <div id="close-confirmation" hidden><button id="btn-cancel-close">Cancel</button><button id="btn-confirm-close">Close</button><div id="close-dialog-error" hidden></div></div>`;
+  });
+
+  test("dispatches window commands, coalesces requests, and permits retry after safe failure", async () => {
+    const calls: string[] = [];
+    const errors: boolean[] = [];
+    let release: (() => void) | undefined;
+    const controls = initWindowControls(async (command) => {
+      calls.push(command);
+      if (command === "request_close_app") await new Promise<void>((resolve) => { release = resolve; });
+      else throw new Error("private host and credentials");
+    }, () => {}, (shown) => { errors.push(shown); });
+    happyDoc.getElementById("btn-close-app")!.click();
+    happyDoc.getElementById("btn-close-app")!.click();
+    expect(calls).toEqual(["request_close_app"]);
+    release!();
+    await Promise.resolve();
+    await Promise.resolve();
+    happyDoc.getElementById("btn-minimize-app")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(happyDoc.getElementById("window-action-error")!.textContent).toBe("Could not minimize the app. Try again.");
+    expect(happyDoc.body.textContent).not.toContain("credentials");
+    expect(controls.isErrorVisible()).toBe(true);
+    expect(errors.at(-1)).toBe(true);
+    happyDoc.getElementById("btn-minimize-app")!.click();
+    expect(calls.filter((command) => command === "minimize_app").length).toBe(2);
+    expect(errors.at(-1)).toBe(false);
+    await Promise.resolve();
+    controls.dispose();
+  });
+
+  test("defaults to Cancel, traps focus, and Escape restores edited Settings and focus", async () => {
+    const calls: unknown[] = [];
+    const controls = initWindowControls(async (command, args) => { calls.push([command, args]); }, () => {});
+    const input = happyDoc.getElementById("unsaved")!;
+    input.focus();
+    controls.showConfirmation();
+    controls.showConfirmation();
+    const cancel = happyDoc.getElementById("btn-cancel-close")!;
+    const confirm = happyDoc.getElementById("btn-confirm-close")!;
+    expect(happyDoc.activeElement).toBe(cancel);
+    expect(happyDoc.getElementById("settings-drawer")!.inert).toBe(true);
+    happyWindow.dispatchEvent(new happyWindow.KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    expect(happyDoc.activeElement).toBe(confirm);
+    happyWindow.dispatchEvent(new happyWindow.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
+    expect(happyDoc.activeElement).toBe(cancel);
+    happyWindow.dispatchEvent(new happyWindow.KeyboardEvent("keydown", { code: "Escape", bubbles: true }));
+    await Promise.resolve();
+    expect(calls).toEqual([["resolve_close_app", { confirmed: false }]]);
+    expect(controls.isOpen()).toBe(false);
+    expect(happyDoc.activeElement).toBe(input);
+    expect((input as unknown as HTMLInputElement).value).toBe("keep my edit");
+    expect(happyDoc.getElementById("settings-drawer")!.inert).toBe(false);
+    controls.dispose();
+  });
+
+  test("blocks duplicate resolutions and keeps failed confirmation available for retry", async () => {
+    let reject: ((reason?: unknown) => void) | undefined;
+    const calls: unknown[] = [];
+    const controls = initWindowControls(async (command, args) => {
+      calls.push([command, args]);
+      await new Promise<void>((_, fail) => { reject = fail; });
+    }, () => {});
+    controls.showConfirmation();
+    const confirm = happyDoc.getElementById("btn-confirm-close")!;
+    confirm.click();
+    confirm.click();
+    expect(calls).toEqual([["resolve_close_app", { confirmed: true }]]);
+    reject!(new Error("sensitive error"));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controls.isOpen()).toBe(true);
+    expect(happyDoc.getElementById("close-dialog-error")!.textContent).toBe("Could not close the app. Try again or cancel.");
+    expect(happyDoc.activeElement).toBe(happyDoc.getElementById("btn-cancel-close"));
+    confirm.click();
+    expect(calls.length).toBe(2);
+    reject!();
+    await Promise.resolve();
+    await Promise.resolve();
+    controls.dispose();
+  });
+
+  test("successful close stays locked while native shutdown completes", async () => {
+    let calls = 0;
+    const controls = initWindowControls(async () => { calls++; }, () => {});
+    controls.showConfirmation();
+    happyDoc.getElementById("btn-confirm-close")!.click();
+    await Promise.resolve();
+    happyDoc.getElementById("btn-confirm-close")!.click();
+    happyWindow.dispatchEvent(new happyWindow.KeyboardEvent("keydown", { code: "Escape" }));
+    expect(calls).toBe(1);
+    expect((happyDoc.getElementById("btn-cancel-close") as unknown as HTMLButtonElement).disabled).toBe(true);
+    controls.dispose();
   });
 });
