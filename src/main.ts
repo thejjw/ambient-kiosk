@@ -67,6 +67,234 @@ export interface TourStatusPayload {
   is_paused: boolean;
 }
 
+export interface FeedRefreshStatus {
+  endpoint_id: string;
+  tile_index: number;
+  last_attempt_at_ms: number | null;
+  last_completed_at_ms: number | null;
+  last_outcome: string | null;
+  elapsed_ms: number | null;
+  pending: boolean;
+}
+
+export interface DiagnosticsSnapshot {
+  session_id: string;
+  uptime_seconds: number;
+  log_path: string;
+  storage_available: boolean;
+  write_errors: number;
+  dropped_records: number;
+  tour_state: string;
+  active_endpoint_id: string | null;
+  proxy_enabled: boolean;
+  proxy_connections: number;
+  dns_resolved: number;
+  dns_blocked: number;
+  dns_failed: number;
+  feeds: FeedRefreshStatus[];
+}
+
+/// Renders the diagnostics summary using text nodes so endpoint IDs stay inert.
+export function renderDiagnostics(snapshot: DiagnosticsSnapshot) {
+  const health = document.getElementById("diagnostics-health");
+  const feeds = document.getElementById("diagnostics-feeds");
+  if (!health || !feeds) return;
+
+  const hasWarning = !snapshot.storage_available || snapshot.write_errors > 0 || snapshot.dropped_records > 0;
+  health.classList.toggle("warning", hasWarning);
+  health.textContent = `${hasWarning ? "Logging warning" : "Logging active"} · ${snapshot.tour_state} · uptime ${formatUptime(snapshot.uptime_seconds)} · proxy ${snapshot.proxy_enabled ? "on" : "off"} (${snapshot.proxy_connections} connections, DNS ${snapshot.dns_resolved} resolved / ${snapshot.dns_blocked} blocked / ${snapshot.dns_failed} failed) · ${snapshot.write_errors} write errors · ${snapshot.dropped_records} dropped records`;
+
+  const path = document.createElement("div");
+  path.className = "diagnostics-path";
+  path.textContent = `Log file: ${snapshot.log_path}`;
+  feeds.replaceChildren(path);
+
+  for (const feed of snapshot.feeds) {
+    const row = document.createElement("div");
+    row.className = "diagnostics-feed";
+    const heading = document.createElement("strong");
+    heading.textContent = `${feed.endpoint_id} · tile ${feed.tile_index + 1}`;
+    const attempt = feed.last_attempt_at_ms === null ? "Not attempted this session" : `Last attempt: ${formatTimestamp(feed.last_attempt_at_ms)}`;
+    const outcome = feed.pending ? "Refresh requested; waiting for a load finish" : feed.last_outcome ?? "No refresh outcome";
+    const elapsed = feed.elapsed_ms === null ? "" : ` · ${feed.elapsed_ms} ms`;
+    const completed = feed.last_completed_at_ms === null ? "" : ` · Last finish observed: ${formatTimestamp(feed.last_completed_at_ms)}`;
+    const detail = document.createElement("div");
+    detail.textContent = `${attempt} · ${outcome}${elapsed}${completed}`;
+    row.append(heading, detail);
+    feeds.append(row);
+  }
+}
+
+function formatTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleString();
+}
+
+function formatUptime(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
+/// Connects trusted HUD window actions and keeps close confirmation keyboard-accessible.
+export function initWindowControls(
+  dispatch: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
+  onDialogChange: (open: boolean) => void,
+  onErrorChange: (shown: boolean) => void = () => {},
+) {
+  const minimize = document.getElementById("btn-minimize-app") as HTMLButtonElement;
+  const close = document.getElementById("btn-close-app") as HTMLButtonElement;
+  const dialog = document.getElementById("close-confirmation")!;
+  const cancel = document.getElementById("btn-cancel-close") as HTMLButtonElement;
+  const confirm = document.getElementById("btn-confirm-close") as HTMLButtonElement;
+  const error = document.getElementById("window-action-error")!;
+  const dialogError = document.getElementById("close-dialog-error")!;
+  const background = [document.getElementById("hud-overlay")!, document.getElementById("settings-drawer")!];
+  let open = false;
+  let resolving = false;
+  let requesting = false;
+  let previousFocus: HTMLElement | null = null;
+  let previousInert: boolean[] = [];
+
+  function setWindowError(message?: string) {
+    error.textContent = message ?? "";
+    error.hidden = !message;
+    onErrorChange(Boolean(message));
+  }
+
+  // Opens one backend-requested confirmation and preserves background focus.
+  function showConfirmation() {
+    if (open) return;
+    previousFocus = document.activeElement as HTMLElement | null;
+    previousInert = background.map((element) => element.inert);
+    background.forEach((element) => { element.inert = true; });
+    open = true;
+    dialog.hidden = false;
+    setWindowError();
+    dialogError.hidden = true;
+    onDialogChange(true);
+    cancel.focus();
+  }
+
+  async function resolve(confirmed: boolean) {
+    if (!open || resolving) return;
+    resolving = true;
+    cancel.disabled = confirm.disabled = true;
+    dialogError.hidden = true;
+    let confirmedClose = false;
+    try {
+      await dispatch("resolve_close_app", { confirmed });
+      confirmedClose = confirmed;
+      if (!confirmed) {
+        open = false;
+        dialog.hidden = true;
+        background.forEach((element, index) => { element.inert = previousInert[index]; });
+        onDialogChange(false);
+        if (previousFocus?.isConnected) previousFocus.focus();
+      }
+    } catch {
+      dialogError.textContent = confirmed ? "Could not close the app. Try again or cancel." : "Could not cancel closing. Try again.";
+      dialogError.hidden = false;
+    } finally {
+      // A successful close remains locked until the native window exits.
+      if (!confirmedClose) {
+        resolving = false;
+        cancel.disabled = confirm.disabled = false;
+        if (open) cancel.focus();
+      }
+    }
+  }
+
+  const onMinimize = async () => {
+    if (minimize.disabled || open) return;
+    minimize.disabled = true;
+    setWindowError();
+    try { await dispatch("minimize_app"); }
+    catch {
+      setWindowError("Could not minimize the app. Try again.");
+    } finally { minimize.disabled = false; }
+  };
+  const onClose = async () => {
+    if (requesting || open) return;
+    requesting = true;
+    close.disabled = true;
+    setWindowError();
+    try { await dispatch("request_close_app"); }
+    catch {
+      setWindowError("Could not open close confirmation. Try again.");
+    } finally { requesting = false; close.disabled = false; }
+  };
+  const onCancel = () => { void resolve(false); };
+  const onConfirm = () => { void resolve(true); };
+  const onKeydown = (event: KeyboardEvent) => {
+    if (!open) return;
+    // Stop the drawer Escape handler and any tour shortcuts while modal.
+    event.stopImmediatePropagation();
+    if (event.code === "Escape" || event.key === "Escape") {
+      event.preventDefault();
+      void resolve(false);
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      if (!resolving) {
+        (document.activeElement === cancel ? confirm : cancel).focus();
+      }
+    }
+  };
+  const onFocus = (event: FocusEvent) => {
+    if (open && !dialog.contains(event.target as Node) && !resolving) cancel.focus();
+  };
+  minimize.addEventListener("click", onMinimize);
+  close.addEventListener("click", onClose);
+  cancel.addEventListener("click", onCancel);
+  confirm.addEventListener("click", onConfirm);
+  window.addEventListener("keydown", onKeydown, true);
+  window.addEventListener("focusin", onFocus);
+  return {
+    showConfirmation,
+    // Exposes modal visibility to the existing HUD auto-hide timer.
+    isOpen: () => open,
+    // Keeps actionable failure feedback visible until the operator retries.
+    isErrorVisible: () => !error.hidden,
+    /// Releases DOM listeners when a HUD instance is destroyed.
+    dispose() {
+      minimize.removeEventListener("click", onMinimize);
+      close.removeEventListener("click", onClose);
+      cancel.removeEventListener("click", onCancel);
+      confirm.removeEventListener("click", onConfirm);
+      window.removeEventListener("keydown", onKeydown, true);
+      window.removeEventListener("focusin", onFocus);
+    },
+  };
+}
+
+/** Renders backend tour state, including pause feedback and accessible action labels. */
+export function renderTourStatus(p: TourStatusPayload) {
+  const status = document.getElementById("hud-status")!;
+  const title = document.getElementById("hud-title")!;
+  const pause = document.getElementById("btn-pause")!;
+  pause.innerHTML = p.is_paused ? "&#9654;" : "&#10074;&#10074;";
+  pause.setAttribute("aria-label", p.is_paused ? "Resume tour" : "Pause tour");
+  pause.title = p.is_paused ? "Resume tour (Space)" : "Pause tour (Space)";
+  if (p.is_paused || p.state === "Paused") {
+    status.textContent = "PAUSED";
+    status.classList.remove("maximized");
+    if (p.active_title) title.textContent = p.active_title;
+  } else if (p.state === "GridView") {
+    status.textContent = "GRID VIEW";
+    status.classList.remove("maximized");
+    title.textContent = "Ambient Overview";
+  } else if (p.state === "MaximizedSingleSite" || p.state === "Maximizing") {
+    status.textContent = "MAXIMIZED";
+    status.classList.add("maximized");
+    title.textContent = p.active_title || `Site #${(p.active_index ?? 0) + 1}`;
+  } else if (p.state === "PreparingNext") {
+    status.textContent = "PREPARING";
+    status.classList.remove("maximized");
+    title.textContent = `Pre-refreshing ${p.active_title || "next site"}...`;
+  }
+  document.getElementById("hud-progress-bar")!.style.width = `${Math.min(100, Math.max(0, p.progress_percent))}%`;
+}
+
 export function bootstrapApp() {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     return;
@@ -78,6 +306,8 @@ export function bootstrapApp() {
     // Main coordinator window only hosts child webviews
     document.getElementById("hud-overlay")?.remove();
     document.getElementById("settings-drawer")?.remove();
+    document.getElementById("close-confirmation")?.remove();
+    document.getElementById("window-action-error")?.remove();
   } else {
     initHudWindow();
   }
@@ -89,9 +319,6 @@ if (typeof window !== "undefined") {
 
 function initHudWindow() {
   const hudOverlay = document.getElementById("hud-overlay")!;
-  const hudStatus = document.getElementById("hud-status")!;
-  const hudTitle = document.getElementById("hud-title")!;
-  const hudProgressBar = document.getElementById("hud-progress-bar")!;
   const btnPrev = document.getElementById("btn-prev")!;
   const btnPause = document.getElementById("btn-pause")!;
   const btnNext = document.getElementById("btn-next")!;
@@ -107,6 +334,28 @@ function initHudWindow() {
   let currentConfigMeta: ConfigMetaResponse | null = null;
   let isPaused = false;
   let hudTimeout: number | null = null;
+  let diagnosticsTimer: number | null = null;
+  let diagnosticsLoading = false;
+  let restoreHudHidden = false;
+  const windowControls = initWindowControls(invoke, (open) => {
+    if (open) {
+      restoreHudHidden = hudOverlay.classList.contains("hidden");
+      showHud();
+    } else if (restoreHudHidden && settingsDrawer.classList.contains("hidden")) {
+      hudOverlay.classList.add("hidden");
+    } else scheduleHideHud();
+  }, (shown) => {
+    if (shown) showHud();
+    else scheduleHideHud();
+  });
+  // Reconcile after registration so an early native close cannot lose its dialog.
+  void listen("app-close-confirmation", () => windowControls.showConfirmation())
+    .then(async () => {
+      if (await invoke<boolean>("get_close_pending")) windowControls.showConfirmation();
+    }).catch(() => reportFrontendError("promise_rejection"));
+
+  window.addEventListener("error", () => reportFrontendError("window_error"));
+  window.addEventListener("unhandledrejection", () => reportFrontendError("promise_rejection"));
 
   function showHud() {
     if (hudTimeout) {
@@ -119,7 +368,7 @@ function initHudWindow() {
   function scheduleHideHud() {
     if (hudTimeout) clearTimeout(hudTimeout);
     hudTimeout = window.setTimeout(() => {
-      if (settingsDrawer.classList.contains("hidden")) {
+      if (settingsDrawer.classList.contains("hidden") && !windowControls.isOpen() && !windowControls.isErrorVisible()) {
         hudOverlay.classList.add("hidden");
       }
     }, 2500);
@@ -148,6 +397,7 @@ function initHudWindow() {
     settingsDrawer.classList.remove("hidden");
     showHud();
     loadConfigIntoDrawer();
+    startDiagnosticsPolling();
   }
 
   async function closeSettings() {
@@ -158,7 +408,40 @@ function initHudWindow() {
       return;
     }
     settingsDrawer.classList.add("hidden");
+    if (diagnosticsTimer !== null) {
+      clearInterval(diagnosticsTimer);
+      diagnosticsTimer = null;
+    }
     scheduleHideHud();
+  }
+
+  function reportFrontendError(category: string) {
+    void invoke("report_frontend_error", { category }).catch(() => {});
+  }
+
+  async function refreshDiagnostics() {
+    if (diagnosticsLoading || settingsDrawer.classList.contains("hidden")) return;
+    diagnosticsLoading = true;
+    try {
+      const snapshot: DiagnosticsSnapshot = await invoke("get_diagnostics");
+      renderDiagnostics(snapshot);
+    } catch {
+      reportFrontendError("settings_load_failed");
+      const health = document.getElementById("diagnostics-health");
+      if (health) {
+        health.classList.add("warning");
+        health.textContent = "Diagnostics could not be loaded.";
+      }
+    } finally {
+      diagnosticsLoading = false;
+    }
+  }
+
+  function startDiagnosticsPolling() {
+    void refreshDiagnostics();
+    if (diagnosticsTimer === null) {
+      diagnosticsTimer = window.setInterval(() => void refreshDiagnostics(), 2000);
+    }
   }
 
   async function loadConfigIntoDrawer() {
@@ -212,6 +495,7 @@ function initHudWindow() {
         renderEndpointsList(cfg.endpoints, meta.is_readonly, cfg.limits.max_resident_webviews);
       };
     } catch (err) {
+      reportFrontendError("settings_load_failed");
       console.error("Failed to load config:", err);
     }
   }
@@ -230,6 +514,7 @@ function initHudWindow() {
       alert("Saved - restart to apply changes.");
       await closeSettings();
     } catch (err) {
+      reportFrontendError("settings_save_failed");
       alert("Error saving config: " + err);
     }
   });
@@ -242,6 +527,7 @@ function initHudWindow() {
         await invoke("export_config", { config: currentConfigMeta.config, destinationPath: path });
         alert("Configuration exported to " + path);
       } catch (err) {
+        reportFrontendError("settings_export_failed");
         alert("Error exporting config: " + err);
       }
     }
@@ -259,28 +545,12 @@ function initHudWindow() {
   listen<TourStatusPayload>("tour-status-update", (event) => {
     const p = event.payload;
     isPaused = p.is_paused;
-    btnPause.innerHTML = isPaused ? "&#9654;" : "&#10074;&#10074;";
-
-    if (p.state === "GridView") {
-      hudStatus.textContent = "GRID VIEW";
-      hudStatus.classList.remove("maximized");
-      hudTitle.textContent = "Ambient Overview";
-    } else if (p.state === "MaximizedSingleSite" || p.state === "Maximizing") {
-      hudStatus.textContent = "MAXIMIZED";
-      hudStatus.classList.add("maximized");
-      hudTitle.textContent = p.active_title || `Site #${(p.active_index ?? 0) + 1}`;
-    } else if (p.state === "PreparingNext") {
-      hudStatus.textContent = "PREPARING";
-      hudStatus.classList.remove("maximized");
-      hudTitle.textContent = `Pre-refreshing ${p.active_title || "next site"}...`;
-    }
-
-    hudProgressBar.style.width = `${Math.min(100, Math.max(0, p.progress_percent))}%`;
+    renderTourStatus(p);
   });
 
   // Listen to native cursor tracking visibility event from backend
   listen<boolean>("hud-visibility", (event) => {
-    if (event.payload || !settingsDrawer.classList.contains("hidden")) {
+    if (event.payload || !settingsDrawer.classList.contains("hidden") || windowControls.isOpen() || windowControls.isErrorVisible()) {
       showHud();
     } else {
       scheduleHideHud();

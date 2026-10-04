@@ -15,6 +15,10 @@
     "core:window:allow-set-position",
     "core:window:allow-set-ignore-cursor-events",
     "allow-get-config",
+    "allow-minimize-app",
+    "allow-request-close-app",
+    "allow-resolve-close-app",
+    "allow-get-close-pending",
     "allow-save-config",
     "allow-export-config",
     "allow-set-settings-open",
@@ -25,6 +29,8 @@
     "allow-prev-tile",
     "allow-toggle-fullscreen",
     "allow-minimize-current",
-    "allow-get-tour-status"
+    "allow-get-tour-status",
+    "allow-get-diagnostics",
+    "allow-report-frontend-error"
   ]
 }

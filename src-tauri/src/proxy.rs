@@ -1,4 +1,5 @@
 use crate::config::NetworkDnsConfig;
+use crate::diagnostics::DiagnosticsState;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,8 +134,29 @@ pub async fn resolve_host_adguard(host: &str, cfg: &NetworkDnsConfig) -> Option<
     resolve_with_adguard_plain_udp(host, &cfg.plain_dns_ip).await
 }
 
+async fn resolve_host_with_diagnostics(
+    host: &str,
+    cfg: &NetworkDnsConfig,
+    diagnostics: Option<&DiagnosticsState>,
+) -> Option<IpAddr> {
+    let result = resolve_host_adguard(host, cfg).await;
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.record_proxy_outcome(match result {
+            Some(ip) if ip.is_unspecified() => "blocked",
+            Some(_) => "resolved",
+            None => "failed",
+        });
+    }
+    result
+}
+
 /// Handles SOCKS5 protocol handshake, request parsing, AdGuard resolution, and forwarding.
-async fn handle_socks5(mut client: TcpStream, initial_buf: &[u8], cfg: Arc<NetworkDnsConfig>) {
+async fn handle_socks5(
+    mut client: TcpStream,
+    initial_buf: &[u8],
+    cfg: Arc<NetworkDnsConfig>,
+    diagnostics: Option<Arc<DiagnosticsState>>,
+) {
     // 1. Negotiation Greeting
     // initial_buf contains [0x05, nmethods, methods...]
     if initial_buf.len() < 2 || initial_buf[0] != 0x05 {
@@ -213,16 +235,18 @@ async fn handle_socks5(mut client: TcpStream, initial_buf: &[u8], cfg: Arc<Netwo
     // 3. Resolve target host via AdGuard
     let resolved_ip = match target_ip_opt {
         Some(ip) => ip,
-        None => match resolve_host_adguard(&target_host, &cfg).await {
-            Some(ip) => ip,
-            None => {
-                // Host unreachable
-                let _ = client
-                    .write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                    .await;
-                return;
+        None => {
+            match resolve_host_with_diagnostics(&target_host, &cfg, diagnostics.as_deref()).await {
+                Some(ip) => ip,
+                None => {
+                    // Host unreachable
+                    let _ = client
+                        .write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                        .await;
+                    return;
+                }
             }
-        },
+        }
     };
 
     if resolved_ip.is_unspecified() {
@@ -302,6 +326,7 @@ async fn handle_http(
     initial_buf: &[u8],
     n: usize,
     cfg: Arc<NetworkDnsConfig>,
+    diagnostics: Option<Arc<DiagnosticsState>>,
 ) {
     let req_str = String::from_utf8_lossy(&initial_buf[..n]);
     let first_line = req_str.lines().next().unwrap_or("");
@@ -314,7 +339,7 @@ async fn handle_http(
         }
     };
 
-    let target_ip = match resolve_host_adguard(&host, &cfg).await {
+    let target_ip = match resolve_host_with_diagnostics(&host, &cfg, diagnostics.as_deref()).await {
         Some(ip) => {
             if ip.is_unspecified() {
                 // AdGuard blocked tracker
@@ -375,6 +400,14 @@ async fn handle_http(
 /// Starts an embedded loopback proxy multiplexing HTTP CONNECT, plain HTTP, and SOCKS5 on 127.0.0.1:0.
 /// Returns the bound ephemeral port.
 pub async fn start_adguard_proxy(cfg: NetworkDnsConfig) -> Result<u16, String> {
+    start_adguard_proxy_with_diagnostics(cfg, None).await
+}
+
+/// Starts the proxy and updates aggregate diagnostics without recording destination hosts.
+pub async fn start_adguard_proxy_with_diagnostics(
+    cfg: NetworkDnsConfig,
+    diagnostics: Option<Arc<DiagnosticsState>>,
+) -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("Failed to bind local adblocking proxy: {}", e))?;
@@ -384,6 +417,7 @@ pub async fn start_adguard_proxy(cfg: NetworkDnsConfig) -> Result<u16, String> {
         .port();
 
     let cfg_arc = Arc::new(cfg);
+    let diagnostics_accept = diagnostics.clone();
 
     tokio::spawn(async move {
         loop {
@@ -393,6 +427,10 @@ pub async fn start_adguard_proxy(cfg: NetworkDnsConfig) -> Result<u16, String> {
             };
 
             let cfg_clone = cfg_arc.clone();
+            let diagnostics_clone = diagnostics_accept.clone();
+            if let Some(diagnostics) = diagnostics_clone.as_ref() {
+                diagnostics.record_proxy_outcome("connection");
+            }
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 let n = match client.read(&mut buf).await {
@@ -402,10 +440,10 @@ pub async fn start_adguard_proxy(cfg: NetworkDnsConfig) -> Result<u16, String> {
 
                 if buf[0] == 0x05 {
                     // SOCKS5 protocol
-                    handle_socks5(client, &buf[..n], cfg_clone).await;
+                    handle_socks5(client, &buf[..n], cfg_clone, diagnostics_clone).await;
                 } else {
                     // HTTP CONNECT / Plain HTTP forward proxy
-                    handle_http(client, &buf, n, cfg_clone).await;
+                    handle_http(client, &buf, n, cfg_clone, diagnostics_clone).await;
                 }
             });
         }

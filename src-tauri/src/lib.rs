@@ -1,4 +1,5 @@
 pub mod config;
+pub mod diagnostics;
 pub mod layout;
 pub mod proxy;
 pub mod tour;
@@ -20,7 +21,10 @@ fn get_kiosk_shortcuts() -> [Shortcut; 6] {
     ]
 }
 
-async fn unregister_kiosk_shortcuts_bounded(app: &tauri::AppHandle) -> bool {
+async fn unregister_kiosk_shortcuts_bounded(
+    app: &tauri::AppHandle,
+    diagnostics: &diagnostics::DiagnosticsState,
+) -> bool {
     for attempt in 1..=3 {
         if app.global_shortcut().unregister_all().is_ok() {
             return true;
@@ -30,7 +34,12 @@ async fn unregister_kiosk_shortcuts_bounded(app: &tauri::AppHandle) -> bool {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
     }
-    eprintln!("[Shortcuts] CRITICAL: unregister_kiosk_shortcuts failed after 3 bounded retries");
+    diagnostics.event(
+        tracing::Level::ERROR,
+        "shortcuts",
+        "shortcut_unregister_failed",
+        serde_json::json!({ "attempts": 3 }),
+    );
     false
 }
 struct FocusShortcutManager {
@@ -40,26 +49,230 @@ struct FocusShortcutManager {
 
 struct HudInteractionState {
     settings_open: AtomicBool,
+    close_state: parking_lot::Mutex<CloseState>,
     shortcut_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum CloseState {
+    #[default]
+    Idle,
+    Pending,
+    Approved,
+}
+
+impl CloseState {
+    fn request(&mut self) -> bool {
+        if *self != Self::Idle {
+            return false;
+        }
+        *self = Self::Pending;
+        true
+    }
+
+    fn resolve(&mut self, confirmed: bool) -> Result<(), String> {
+        if *self != Self::Pending {
+            return Err("No close confirmation is pending".into());
+        }
+        *self = if confirmed {
+            Self::Approved
+        } else {
+            Self::Idle
+        };
+        Ok(())
+    }
+}
+
+impl HudInteractionState {
+    fn modal_open(&self) -> bool {
+        self.settings_open.load(Ordering::SeqCst) || *self.close_state.lock() == CloseState::Pending
+    }
+}
+
+fn require_hud(label: &str) -> Result<(), String> {
+    if label == "hud-overlay" {
+        Ok(())
+    } else {
+        Err("Only the HUD can control the app".into())
+    }
+}
+
+fn window_event_log(app: &tauri::AppHandle, event: &str, failed: bool) {
+    if let Some(diagnostics) = app.try_state::<Arc<diagnostics::DiagnosticsState>>() {
+        diagnostics.event(
+            if failed {
+                tracing::Level::WARN
+            } else {
+                tracing::Level::INFO
+            },
+            "window",
+            event,
+            serde_json::json!({}),
+        );
+    }
+}
+
+fn show_close_confirmation(
+    app: &tauri::AppHandle,
+    state: &HudInteractionState,
+) -> Result<(), String> {
+    {
+        let mut close = state.close_state.lock();
+        if !close.request() {
+            // Replay pending requests so a native close during HUD startup is recoverable.
+            if *close == CloseState::Pending {
+                let _ = app.emit_to("hud-overlay", "app-close-confirmation", ());
+            }
+            return Ok(());
+        }
+    }
+    let _ = state.shortcut_tx.send(false);
+    let result = (|| -> tauri::Result<()> {
+        let main = app.get_window("main").ok_or(tauri::Error::WindowNotFound)?;
+        let hud = app
+            .get_window("hud-overlay")
+            .ok_or(tauri::Error::WindowNotFound)?;
+        main.unminimize()?;
+        align_hud(app, true).map_err(|_| tauri::Error::WindowNotFound)?;
+        hud.set_ignore_cursor_events(false)?;
+        hud.show()?;
+        hud.set_focus()?;
+        app.emit_to("hud-overlay", "app-close-confirmation", ())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        *state.close_state.lock() = CloseState::Idle;
+        let _ = align_hud(app, state.settings_open.load(Ordering::SeqCst));
+        let focused = app
+            .get_window("main")
+            .and_then(|w| w.is_focused().ok())
+            .unwrap_or(false)
+            || app
+                .get_window("hud-overlay")
+                .and_then(|w| w.is_focused().ok())
+                .unwrap_or(false);
+        let _ = state.shortcut_tx.send(focused && !state.modal_open());
+        window_event_log(app, "close_confirmation_failed", true);
+        return Err("Could not show close confirmation. Please retry.".into());
+    }
+    window_event_log(app, "close_requested", false);
+    Ok(())
+}
+
+/// Minimizes the main kiosk and its overlay from the trusted HUD.
+#[tauri::command]
+fn minimize_app(
+    webview_window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<HudInteractionState>>,
+) -> Result<(), String> {
+    require_hud(webview_window.label())?;
+    if *state.close_state.lock() != CloseState::Idle {
+        return Err("Close confirmation is open".into());
+    }
+    window_event_log(&app, "minimize_requested", false);
+    let result = (|| -> tauri::Result<()> {
+        app.get_window("main")
+            .ok_or(tauri::Error::WindowNotFound)?
+            .minimize()?;
+        app.get_window("hud-overlay")
+            .ok_or(tauri::Error::WindowNotFound)?
+            .hide()?;
+        Ok(())
+    })();
+    let _ = state.shortcut_tx.send(false);
+    result.map_err(|_| {
+        window_event_log(&app, "minimize_failed", true);
+        "Could not minimize the app. Please retry.".into()
+    })
+}
+
+/// Requests the same confirmation used by native window close actions.
+#[tauri::command]
+fn request_close_app(
+    webview_window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<HudInteractionState>>,
+) -> Result<(), String> {
+    require_hud(webview_window.label())?;
+    show_close_confirmation(&app, &state)
+}
+
+/// Reconciles pending confirmation after the trusted HUD registers its listener.
+#[tauri::command]
+fn get_close_pending(webview_window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<HudInteractionState>>) -> Result<bool, String> {
+    require_hud(webview_window.label())?;
+    Ok(*state.close_state.lock() == CloseState::Pending)
+}
+
+/// Resolves one pending close request without bypassing normal window shutdown.
+#[tauri::command]
+fn resolve_close_app(
+    webview_window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<HudInteractionState>>,
+    confirmed: bool,
+) -> Result<(), String> {
+    require_hud(webview_window.label())?;
+    {
+        let mut close = state.close_state.lock();
+        close.resolve(confirmed)?;
+    }
+    if confirmed {
+        window_event_log(&app, "close_confirmed", false);
+        if app.get_window("main").map(|w| w.close().is_ok()) != Some(true) {
+            *state.close_state.lock() = CloseState::Pending;
+            window_event_log(&app, "close_failed", true);
+            return Err("Could not close the app. Please retry.".into());
+        }
+    } else {
+        window_event_log(&app, "close_cancelled", false);
+        if align_hud(&app, state.settings_open.load(Ordering::SeqCst)).is_err() {
+            *state.close_state.lock() = CloseState::Pending;
+            window_event_log(&app, "close_cancel_failed", true);
+            return Err("Could not dismiss confirmation. Please retry.".into());
+        }
+        let focused = app
+            .get_window("main")
+            .and_then(|w| w.is_focused().ok())
+            .unwrap_or(false)
+            || webview_window.is_focused().unwrap_or(false);
+        let _ = state.shortcut_tx.send(focused && !state.modal_open());
+    }
+    Ok(())
 }
 
 // Keep the overlay in the main window's physical client coordinates at every DPI.
 fn align_hud(app: &tauri::AppHandle, settings_open: bool) -> Result<(), String> {
-    let main = app.get_window("main").ok_or("Main window is unavailable")?;
-    let hud = app
-        .get_window("hud-overlay")
-        .ok_or("HUD window is unavailable")?;
-    let origin = main.inner_position().map_err(|e| e.to_string())?;
-    let size = main.inner_size().map_err(|e| e.to_string())?;
-    let scale = main.scale_factor().map_err(|e| e.to_string())?;
-    let height = if settings_open {
-        size.height.min((900.0 * scale).round() as u32)
-    } else {
-        (48.0 * scale).round() as u32
-    };
-    hud.set_position(origin).map_err(|e| e.to_string())?;
-    hud.set_size(PhysicalSize::new(size.width, height.max(1)))
-        .map_err(|e| e.to_string())
+    let result = (|| {
+        let main = app.get_window("main").ok_or("Main window is unavailable")?;
+        let hud = app
+            .get_window("hud-overlay")
+            .ok_or("HUD window is unavailable")?;
+        let origin = main.inner_position().map_err(|e| e.to_string())?;
+        let size = main.inner_size().map_err(|e| e.to_string())?;
+        let scale = main.scale_factor().map_err(|e| e.to_string())?;
+        let height = if settings_open {
+            size.height.min((900.0 * scale).round() as u32)
+        } else {
+            (48.0 * scale).round() as u32
+        };
+        hud.set_position(origin).map_err(|e| e.to_string())?;
+        hud.set_size(PhysicalSize::new(size.width, height.max(1)))
+            .map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        if let Some(diagnostics) = app.try_state::<Arc<diagnostics::DiagnosticsState>>() {
+            diagnostics.event(
+                tracing::Level::WARN,
+                "hud",
+                "hud_alignment_failed",
+                serde_json::json!({ "settings_open": settings_open }),
+            );
+        }
+    }
+    result
 }
 
 /// Change drawer interaction only from the trusted HUD webview.
@@ -68,23 +281,45 @@ fn set_settings_open(
     webview_window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<HudInteractionState>>,
+    diagnostics: tauri::State<'_, Arc<diagnostics::DiagnosticsState>>,
     open: bool,
 ) -> Result<(), String> {
     if webview_window.label() != "hud-overlay" {
         return Err("Only the HUD can change settings state".into());
     }
+    if *state.close_state.lock() != CloseState::Idle {
+        return Err("Close confirmation is open".into());
+    }
     align_hud(&app, open)?;
-    app.get_window("hud-overlay")
-        .ok_or("HUD window is unavailable")?
-        .set_ignore_cursor_events(false)
-        .map_err(|e| e.to_string())?;
+    let hud = app
+        .get_window("hud-overlay")
+        .ok_or("HUD window is unavailable")?;
+    if let Err(error) = hud.set_ignore_cursor_events(false) {
+        diagnostics.event(
+            tracing::Level::WARN,
+            "hud",
+            "settings_interaction_enable_failed",
+            serde_json::json!({}),
+        );
+        return Err(error.to_string());
+    }
     state.settings_open.store(open, Ordering::SeqCst);
+    diagnostics.event(
+        tracing::Level::INFO,
+        "settings",
+        if open {
+            "settings_opened"
+        } else {
+            "settings_closed"
+        },
+        serde_json::json!({}),
+    );
     let focused = app
         .get_window("main")
         .and_then(|w| w.is_focused().ok())
         .unwrap_or(false)
         || webview_window.is_focused().unwrap_or(false);
-    let _ = state.shortcut_tx.send(!open && focused);
+    let _ = state.shortcut_tx.send(!state.modal_open() && focused);
     Ok(())
 }
 
@@ -108,6 +343,7 @@ pub fn run() {
     let shortcut_tx_cb = shortcut_tx.clone();
     let hud_state = Arc::new(HudInteractionState {
         settings_open: AtomicBool::new(false),
+        close_state: parking_lot::Mutex::new(CloseState::Idle),
         shortcut_tx: shortcut_tx.clone(),
     });
     let hud_state_cb = hud_state.clone();
@@ -143,9 +379,7 @@ pub fn run() {
                                 let _ = hud.show();
                             }
                         }
-                        let _ = shortcut_tx_cb.send(
-                            !minimized && !hud_state_cb.settings_open.load(Ordering::SeqCst),
-                        );
+                        let _ = shortcut_tx_cb.send(!minimized && !hud_state_cb.modal_open());
                     } else {
                         // Focus lost: debounce 150ms and re-query OS focus before requesting unregister
                         let app_handle_delayed = app_handle.clone();
@@ -187,10 +421,7 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Moved(_) if label == "main" => {
-                    let _ = align_hud(
-                        &app_handle,
-                        hud_state_cb.settings_open.load(Ordering::SeqCst),
-                    );
+                    let _ = align_hud(&app_handle, hud_state_cb.modal_open());
                 }
                 tauri::WindowEvent::Resized(size) if label == "main" => {
                     let scale = window.scale_factor().unwrap_or(1.0);
@@ -202,10 +433,7 @@ pub fn run() {
                         if minimized || size.width == 0 || size.height == 0 {
                             let _ = hud.hide();
                         } else {
-                            let _ = align_hud(
-                                &app_handle,
-                                hud_state_cb.settings_open.load(Ordering::SeqCst),
-                            );
+                            let _ = align_hud(&app_handle, hud_state_cb.modal_open());
                             if window.is_focused().unwrap_or(false)
                                 || hud.is_focused().unwrap_or(false)
                             {
@@ -219,10 +447,7 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } if label == "main" => {
-                    let _ = align_hud(
-                        &app_handle,
-                        hud_state_cb.settings_open.load(Ordering::SeqCst),
-                    );
+                    let _ = align_hud(&app_handle, hud_state_cb.modal_open());
                     if let (Ok(size), Ok(scale), Some(ctrl)) = (
                         window.inner_size(),
                         window.scale_factor(),
@@ -234,19 +459,37 @@ pub fn run() {
                         );
                     }
                 }
-                tauri::WindowEvent::CloseRequested { .. } if label == "main" => {
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if label == "main" || label == "hud-overlay" =>
+                {
+                    if *hud_state_cb.close_state.lock() != CloseState::Approved {
+                        api.prevent_close();
+                        let _ = show_close_confirmation(&app_handle, &hud_state_cb);
+                        return;
+                    }
                     let _ = shortcut_tx_cb.send(false);
-                    if let Some(hud) = app_handle.get_window("hud-overlay") {
-                        let _ = hud.close();
+                    if label == "main" {
+                        if let Some(hud) = app_handle.get_window("hud-overlay") {
+                            let _ = hud.close();
+                        }
                     }
                 }
                 tauri::WindowEvent::Destroyed if label == "main" => {
+                    if let Some(controller) = app_handle.try_state::<Arc<tour::TourController>>() {
+                        controller.inner().shutdown();
+                    } else if let Some(diagnostics) =
+                        app_handle.try_state::<Arc<diagnostics::DiagnosticsState>>()
+                    {
+                        diagnostics.shutdown();
+                    }
                     app_handle.exit(0);
                 }
                 _ => {}
             }
         })
         .setup(move |app| {
+            let diagnostics = diagnostics::DiagnosticsState::initialize(app.handle());
+            app.manage(diagnostics.clone());
             app.manage(hud_state.clone());
             let app_data_dir = app
                 .path()
@@ -259,21 +502,78 @@ pub fn run() {
                 cli_config_path.as_deref(),
                 exe_path.as_deref(),
                 &app_data_dir,
-            )
-            .map_err(|e| format!("Failed to initialize kiosk configuration: {}", e))?;
+            );
+            let meta = match meta {
+                Ok(meta) => meta,
+                Err(error) => {
+                    diagnostics.event(
+                        tracing::Level::ERROR,
+                        "configuration",
+                        "configuration_load_failed",
+                        serde_json::json!({ "category": "invalid_or_unreadable" }),
+                    );
+                    return Err(
+                        format!("Failed to initialize kiosk configuration: {}", error).into(),
+                    );
+                }
+            };
 
             let cfg = meta.config.clone();
+            diagnostics.event(
+                tracing::Level::INFO,
+                "configuration",
+                "configuration_loaded",
+                serde_json::json!({
+                    "source": meta.source.to_string(),
+                    "endpoint_count": cfg.endpoints.len(),
+                    "proxy_enabled": cfg.network_dns.adblock_dns_enabled,
+                }),
+            );
+            diagnostics.set_feeds(
+                &cfg.endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.id.clone())
+                    .collect::<Vec<_>>(),
+                cfg.network_dns.adblock_dns_enabled,
+            );
             let config_state = Arc::new(config::AppConfigState::new(meta, app_data_dir));
             app.manage(config_state);
 
             // 1. Start loopback proxy if adblock DNS is active
             let proxy_port = if cfg.network_dns.adblock_dns_enabled {
-                let p = tauri::async_runtime::block_on(async {
-                    proxy::start_adguard_proxy(cfg.network_dns.clone()).await
-                })
-                .map_err(|e| format!("Failed to start AdGuard proxy: {}", e))?;
+                let start_result = tauri::async_runtime::block_on(async {
+                    proxy::start_adguard_proxy_with_diagnostics(
+                        cfg.network_dns.clone(),
+                        Some(diagnostics.clone()),
+                    )
+                    .await
+                });
+                let p = match start_result {
+                    Ok(port) => port,
+                    Err(error) => {
+                        diagnostics.event(
+                            tracing::Level::ERROR,
+                            "proxy",
+                            "proxy_start_failed",
+                            serde_json::json!({ "category": "bind_failed" }),
+                        );
+                        return Err(format!("Failed to start AdGuard proxy: {}", error).into());
+                    }
+                };
+                diagnostics.event(
+                    tracing::Level::INFO,
+                    "proxy",
+                    "proxy_started",
+                    serde_json::json!({ "enabled": true }),
+                );
                 Some(p)
             } else {
+                diagnostics.event(
+                    tracing::Level::INFO,
+                    "proxy",
+                    "proxy_disabled",
+                    serde_json::json!({}),
+                );
                 None
             };
 
@@ -311,6 +611,7 @@ pub fn run() {
                 &rects,
                 proxy_port,
                 page_load_tx,
+                diagnostics.clone(),
             )?;
 
             // 4. Initialize TourController and start background tour cycle
@@ -322,6 +623,7 @@ pub fn run() {
                 win_width,
                 win_height,
                 tiles,
+                diagnostics.clone(),
             );
             app.manage(tour_controller.clone());
 
@@ -334,7 +636,7 @@ pub fn run() {
             let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed
-                        && !hud_state_for_shortcuts.settings_open.load(Ordering::SeqCst)
+                        && !hud_state_for_shortcuts.modal_open()
                     {
                         let space_sc = Shortcut::new(Some(Modifiers::empty()), Code::Space);
                         let right_sc = Shortcut::new(Some(Modifiers::empty()), Code::ArrowRight);
@@ -369,6 +671,7 @@ pub fn run() {
 
             // 6. Spawn sequential shortcut reconciler actor
             let app_handle_for_actor = app.handle().clone();
+            let diagnostics_for_actor = diagnostics.clone();
             tauri::async_runtime::spawn(async move {
                 let mut currently_registered = false;
 
@@ -381,21 +684,34 @@ pub fn run() {
                         let mut reg_failed = false;
                         for s in get_kiosk_shortcuts() {
                             if let Err(e) = app_handle_for_actor.global_shortcut().register(s) {
-                                eprintln!("[Shortcuts] Failed to register shortcut {:?}: {}", s, e);
+                                let _ = e;
+                                diagnostics_for_actor.event(
+                                    tracing::Level::WARN,
+                                    "shortcuts",
+                                    "shortcut_register_failed",
+                                    serde_json::json!({ "shortcut": format!("{:?}", s) }),
+                                );
                                 reg_failed = true;
                                 break;
                             }
                         }
                         if reg_failed {
-                            let cleaned =
-                                unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await;
+                            let cleaned = unregister_kiosk_shortcuts_bounded(
+                                &app_handle_for_actor,
+                                &diagnostics_for_actor,
+                            )
+                            .await;
                             currently_registered = !cleaned;
                         } else {
                             currently_registered = true;
                         }
                     } else if !desired
                         && currently_registered
-                        && unregister_kiosk_shortcuts_bounded(&app_handle_for_actor).await
+                        && unregister_kiosk_shortcuts_bounded(
+                            &app_handle_for_actor,
+                            &diagnostics_for_actor,
+                        )
+                        .await
                     {
                         currently_registered = false;
                     }
@@ -436,7 +752,7 @@ pub fn run() {
                         None => continue,
                     };
 
-                    if hud_state_for_cursor.settings_open.load(Ordering::SeqCst) {
+                    if hud_state_for_cursor.modal_open() {
                         if !is_interactive {
                             let _ = hud_win.set_ignore_cursor_events(false);
                             is_interactive = true;
@@ -506,6 +822,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            minimize_app,
+            request_close_app,
+            resolve_close_app,
+            get_close_pending,
             config::get_config,
             config::save_config,
             config::export_config,
@@ -518,7 +838,55 @@ pub fn run() {
             tour::toggle_fullscreen,
             tour::minimize_current,
             tour::get_tour_status,
+            diagnostics::get_diagnostics,
+            diagnostics::report_frontend_error,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod window_control_tests {
+    use super::*;
+
+    #[test]
+    fn only_hud_can_control_main_window() {
+        assert!(require_hud("hud-overlay").is_ok());
+        assert!(require_hud("main").is_err());
+        assert!(require_hud("tile-0").is_err());
+    }
+
+    #[test]
+    fn close_confirmation_rejects_duplicates_and_allows_cancel_retry() {
+        let mut state = CloseState::Idle;
+        assert!(state.resolve(true).is_err());
+        assert!(state.request());
+        assert!(!state.request());
+        state.resolve(false).unwrap();
+        assert_eq!(state, CloseState::Idle);
+        assert!(state.request());
+        state.resolve(true).unwrap();
+        assert_eq!(state, CloseState::Approved);
+        assert!(!state.request());
+        assert!(state.resolve(true).is_err());
+    }
+
+    #[test]
+    fn confirmation_preserves_settings_and_blocks_shortcuts() {
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let state = HudInteractionState {
+            settings_open: AtomicBool::new(false),
+            close_state: parking_lot::Mutex::new(CloseState::Idle),
+            shortcut_tx: tx,
+        };
+        assert!(!state.modal_open());
+        state.close_state.lock().request();
+        assert!(state.modal_open());
+        state.close_state.lock().resolve(false).unwrap();
+        assert!(!state.modal_open());
+        state.settings_open.store(true, Ordering::SeqCst);
+        state.close_state.lock().request();
+        state.close_state.lock().resolve(false).unwrap();
+        assert!(state.modal_open());
+    }
 }

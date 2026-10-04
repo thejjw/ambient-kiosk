@@ -1,4 +1,5 @@
 use crate::config::EndpointItem;
+use crate::diagnostics::DiagnosticsState;
 use crate::layout::LogicalRect;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -19,8 +20,17 @@ use url::Url;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileLoadState {
     Idle,
+    Navigating,
     ReloadRequested { generation: u64 },
     Loading { generation: u64 },
+}
+
+/// Page-load observation with a best-effort refresh generation association.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageLoadObservation {
+    Started { generation: Option<u64> },
+    Finished { generation: Option<u64> },
+    Ignored,
 }
 
 /// Thread-safe coordinator establishing causal event correlation for webview reloads.
@@ -46,25 +56,50 @@ impl TileLoadCoordinator {
         *s = TileLoadState::ReloadRequested { generation };
     }
 
-    /// Processes PageLoadEvent and returns Some(generation) only when Finished genuinely
-    /// pairs with the in-flight reload generation. Discards stale or unrequested events.
-    pub fn handle_page_load(&self, event: PageLoadEvent) -> Option<u64> {
+    /// Retires callbacks for one generation while leaving newer work intact.
+    pub fn cancel_reload(&self, generation: u64) {
+        let mut state = self.state.lock();
+        if matches!(*state, TileLoadState::ReloadRequested { generation: current } | TileLoadState::Loading { generation: current } if current == generation)
+        {
+            *state = TileLoadState::Idle;
+        }
+    }
+
+    /// Correlates the callback sequence with a refresh when one is pending.
+    pub fn handle_page_load(&self, event: PageLoadEvent) -> PageLoadObservation {
         let mut s = self.state.lock();
         match (*s, event) {
             (TileLoadState::ReloadRequested { generation }, PageLoadEvent::Started) => {
                 *s = TileLoadState::Loading { generation };
-                None
+                PageLoadObservation::Started {
+                    generation: Some(generation),
+                }
             }
             (TileLoadState::Loading { generation }, PageLoadEvent::Finished) => {
                 *s = TileLoadState::Idle;
-                Some(generation)
+                PageLoadObservation::Finished {
+                    generation: Some(generation),
+                }
             }
-            // Stale Finished arriving while ReloadRequested (before new Started) is discarded!
-            (TileLoadState::ReloadRequested { .. }, PageLoadEvent::Finished) => None,
-            // Spontaneous or unrequested Finished is discarded
-            (TileLoadState::Idle, _) => None,
-            // Re-entrant Started during Loading retains current generation
-            (TileLoadState::Loading { .. }, PageLoadEvent::Started) => None,
+            (TileLoadState::Navigating, PageLoadEvent::Finished) => {
+                *s = TileLoadState::Idle;
+                PageLoadObservation::Finished { generation: None }
+            }
+            (TileLoadState::Idle, PageLoadEvent::Started) => {
+                *s = TileLoadState::Navigating;
+                PageLoadObservation::Started { generation: None }
+            }
+            (TileLoadState::Loading { generation }, PageLoadEvent::Started) => {
+                PageLoadObservation::Started {
+                    generation: Some(generation),
+                }
+            }
+            (TileLoadState::Navigating, PageLoadEvent::Started) => {
+                PageLoadObservation::Started { generation: None }
+            }
+            // Ignore a finish arriving before the requested refresh has started.
+            (TileLoadState::ReloadRequested { .. }, PageLoadEvent::Finished)
+            | (TileLoadState::Idle, PageLoadEvent::Finished) => PageLoadObservation::Ignored,
         }
     }
 }
@@ -85,6 +120,11 @@ impl ManagedWebviewTile {
     pub fn trigger_reload(&self, generation: u64) -> Result<(), tauri::Error> {
         self.coordinator.request_reload(generation);
         self.webview.reload()
+    }
+
+    /// Retires callbacks for an attempt after its timeout, failure, or cancellation.
+    pub fn cancel_reload(&self, generation: u64) {
+        self.coordinator.cancel_reload(generation);
     }
 }
 
@@ -178,7 +218,8 @@ pub fn spawn_resident_webviews(
     endpoints: &[EndpointItem],
     rects: &[LogicalRect],
     proxy_port: Option<u16>,
-    page_load_tx: UnboundedSender<(usize, u64)>,
+    page_load_tx: UnboundedSender<(usize, PageLoadObservation)>,
+    diagnostics: Arc<DiagnosticsState>,
 ) -> Result<Vec<ManagedWebviewTile>, String> {
     if endpoints.len() != rects.len() {
         return Err(format!(
@@ -222,24 +263,53 @@ pub fn spawn_resident_webviews(
         // Security Policy 2: Reject all popup windows from guest web content
         builder = builder.on_new_window(|_url, _features| NewWindowResponse::Deny);
 
-        // Event relay for tour engine pre-refresh tracking with strict generation provenance
+        // The WebView callback has no request ID; generation association is best effort.
         let coordinator = Arc::new(TileLoadCoordinator::new());
         let coord_cb = coordinator.clone();
         let tx = page_load_tx.clone();
+        let diagnostics_cb = diagnostics.clone();
+        let endpoint_id_cb = ep.id.clone();
 
         builder = builder.on_page_load(move |_wv, payload| {
-            if let Some(gen) = coord_cb.handle_page_load(payload.event()) {
-                let _ = tx.send((idx, gen));
+            let observation = coord_cb.handle_page_load(payload.event());
+            if !matches!(observation, PageLoadObservation::Ignored) {
+                if tx.send((idx, observation)).is_err() {
+                    diagnostics_cb.event(
+                        tracing::Level::WARN,
+                        "webview",
+                        "page_load_event_dropped",
+                        serde_json::json!({ "endpoint_id": endpoint_id_cb, "tile_index": idx }),
+                    );
+                }
             }
         });
 
-        let webview = window
-            .add_child(
-                builder,
-                LogicalPosition::new(rect.x, rect.y),
-                LogicalSize::new(rect.width, rect.height),
-            )
-            .map_err(|e| format!("Failed to attach child webview '{}': {}", label, e))?;
+        let webview = match window.add_child(
+            builder,
+            LogicalPosition::new(rect.x, rect.y),
+            LogicalSize::new(rect.width, rect.height),
+        ) {
+            Ok(webview) => webview,
+            Err(error) => {
+                diagnostics.event(
+                    tracing::Level::ERROR,
+                    "webview",
+                    "guest_webview_create_failed",
+                    serde_json::json!({ "endpoint_id": ep.id, "tile_index": idx }),
+                );
+                return Err(format!(
+                    "Failed to attach child webview '{}': {}",
+                    label, error
+                ));
+            }
+        };
+
+        diagnostics.event(
+            tracing::Level::INFO,
+            "webview",
+            "guest_webview_created",
+            serde_json::json!({ "endpoint_id": ep.id, "tile_index": idx }),
+        );
 
         tiles.push(ManagedWebviewTile {
             index: idx,
@@ -319,36 +389,87 @@ mod tests {
     }
 
     #[test]
-    fn test_event_correlated_provenance_and_wraparound_stale_rejection() {
+    fn test_page_load_generation_tracking_and_wraparound_stale_rejection() {
         let coord = TileLoadCoordinator::new();
 
-        // 1. Spontaneous events while Idle are discarded
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Finished), None);
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Started), None);
+        // An unrelated page load is observed without being assigned a reload generation.
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Ignored
+        );
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Started),
+            PageLoadObservation::Started { generation: None }
+        );
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Finished { generation: None }
+        );
 
         // 2. Request reload for Generation 10
         coord.request_reload(10);
 
         // A stale Finished arriving before Started is discarded!
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Finished), None);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Ignored
+        );
 
         // Started arrives -> enters Loading { generation: 10 }
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Started), None);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Started),
+            PageLoadObservation::Started {
+                generation: Some(10)
+            }
+        );
 
         // 3. Wraparound scenario: Generation 10 stalls and tour wraps around to request Generation 20
         coord.request_reload(20);
 
         // Late Finished event from Generation 10 arrives now!
         // Because state is ReloadRequested { generation: 20 }, G10's Finished is rejected!
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Finished), None);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Ignored
+        );
 
         // New Started arrives for Generation 20 -> enters Loading { generation: 20 }
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Started), None);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Started),
+            PageLoadObservation::Started {
+                generation: Some(20)
+            }
+        );
 
         // Real Finished arrives for Generation 20 -> accepted and delivers generation 20!
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Finished), Some(20));
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Finished {
+                generation: Some(20)
+            }
+        );
 
         // Subsequent spurious Finished is discarded
-        assert_eq!(coord.handle_page_load(PageLoadEvent::Finished), None);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Ignored
+        );
+    }
+
+    #[test]
+    fn cancellation_retires_late_completion_for_that_generation() {
+        let coord = TileLoadCoordinator::new();
+        coord.request_reload(30);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Started),
+            PageLoadObservation::Started {
+                generation: Some(30)
+            }
+        );
+        coord.cancel_reload(30);
+        assert_eq!(
+            coord.handle_page_load(PageLoadEvent::Finished),
+            PageLoadObservation::Ignored
+        );
     }
 }

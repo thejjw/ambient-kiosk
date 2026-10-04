@@ -20,19 +20,24 @@
         </div>
         <div class="hud-right">
           <button id="btn-prev" class="hud-btn" title="Previous Tile (&larr;)">&#9664;</button>
-          <button id="btn-pause" class="hud-btn" title="Pause / Resume (Space)">&#10074;&#10074;</button>
+          <button id="btn-pause" class="hud-btn" title="Pause tour (Space)" aria-label="Pause tour">&#10074;&#10074;</button>
           <button id="btn-next" class="hud-btn" title="Next Tile (&rarr;)">&#9654;</button>
           <button id="btn-fullscreen" class="hud-btn" title="Toggle Fullscreen (F11)">&#x26F6;</button>
           <button id="btn-settings" class="hud-btn" title="Settings">&#9881;</button>
+          <div class="hud-window-controls" role="group" aria-label="Window controls">
+            <button id="btn-minimize-app" class="hud-btn" title="Minimize Ambient Kiosk" aria-label="Minimize Ambient Kiosk">&#8722;</button>
+            <button id="btn-close-app" class="hud-btn close-app" title="Close Ambient Kiosk" aria-label="Close Ambient Kiosk">&#215;</button>
+          </div>
         </div>
       </div>
+      <div id="window-action-error" class="window-action-error" role="alert" hidden></div>
     </div>
 
     <!-- Settings Drawer -->
     <div id="settings-drawer" class="settings-drawer hidden">
       <div class="drawer-header">
         <h2>Kiosk Settings</h2>
-        <button id="btn-close-settings" class="drawer-close-btn">&times;</button>
+        <button id="btn-close-settings" class="drawer-close-btn" aria-label="Close Settings" title="Close Settings">&times;</button>
       </div>
       <div id="source-badge" class="source-badge">Configuration Source: Loading...</div>
       <div class="drawer-body">
@@ -69,6 +74,12 @@
           <button id="btn-add-endpoint" class="btn secondary" style="margin-top: 8px;">+ Add Endpoint</button>
         </div>
 
+        <section class="diagnostics-panel" aria-labelledby="diagnostics-heading">
+          <h3 id="diagnostics-heading">Operational Diagnostics</h3>
+          <div id="diagnostics-health" role="status">Loading diagnostics...</div>
+          <div id="diagnostics-feeds" class="diagnostics-feeds"></div>
+        </section>
+
         <div class="drawer-actions">
           <button id="btn-save-settings" class="btn primary">Save Changes</button>
           <button id="btn-export-settings" class="btn secondary">Export Configuration...</button>
@@ -76,6 +87,17 @@
       </div>
     </div>
 
+    <div id="close-confirmation" class="close-confirmation" hidden>
+      <section class="close-dialog" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title" aria-describedby="close-dialog-description">
+        <h2 id="close-dialog-title">Close Ambient Kiosk?</h2>
+        <p id="close-dialog-description">Unsaved Settings edits will be discarded.</p>
+        <p id="close-dialog-error" class="dialog-error" role="alert" hidden></p>
+        <div class="close-dialog-actions">
+          <button id="btn-cancel-close" class="btn secondary">Cancel</button>
+          <button id="btn-confirm-close" class="btn danger">Close</button>
+        </div>
+      </section>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
