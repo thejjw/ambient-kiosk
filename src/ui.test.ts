@@ -12,7 +12,26 @@ const globalScope = globalThis as unknown as {
 globalScope.window = happyWindow;
 globalScope.document = happyDoc;
 
-import { createEndpointRowElement, renderEndpointsList, renderDiagnostics, initWindowControls, EndpointItem, DiagnosticsSnapshot } from "./main";
+import { createEndpointRowElement, renderEndpointsList, renderDiagnostics, initWindowControls, renderTourStatus, EndpointItem, DiagnosticsSnapshot, TourStatusPayload } from "./main";
+
+test("paused badge replaces maximized status and resume restores view and action labels", () => {
+  happyDoc.body.innerHTML = '<span id="hud-status"></span><span id="hud-title"></span><button id="btn-pause"></button><div id="hud-progress-bar"></div>';
+  const payload: TourStatusPayload = { state: "MaximizedSingleSite", active_index: 0, active_title: "Test feed", progress_percent: 40, is_paused: false };
+  renderTourStatus(payload);
+  renderTourStatus({ ...payload, state: "Paused", is_paused: true });
+  expect(happyDoc.getElementById("hud-status")!.textContent).toBe("PAUSED");
+  expect(happyDoc.getElementById("hud-title")!.textContent).toBe("Test feed");
+  expect(happyDoc.getElementById("btn-pause")!.getAttribute("aria-label")).toBe("Resume tour");
+  renderTourStatus(payload);
+  expect(happyDoc.getElementById("hud-status")!.textContent).toBe("MAXIMIZED");
+  expect(happyDoc.getElementById("btn-pause")!.getAttribute("aria-label")).toBe("Pause tour");
+  renderTourStatus({ ...payload, state: "GridView" });
+  renderTourStatus({ ...payload, state: "Paused", is_paused: true, active_title: null });
+  expect(happyDoc.getElementById("hud-status")!.textContent).toBe("PAUSED");
+  expect(happyDoc.getElementById("hud-title")!.textContent).toBe("Ambient Overview");
+  renderTourStatus({ ...payload, state: "GridView" });
+  expect(happyDoc.getElementById("hud-status")!.textContent).toBe("GRID VIEW");
+});
 
 describe("Endpoint UI Security & Validation", () => {
   beforeEach(() => {

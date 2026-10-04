@@ -267,6 +267,34 @@ export function initWindowControls(
   };
 }
 
+/** Renders backend tour state, including pause feedback and accessible action labels. */
+export function renderTourStatus(p: TourStatusPayload) {
+  const status = document.getElementById("hud-status")!;
+  const title = document.getElementById("hud-title")!;
+  const pause = document.getElementById("btn-pause")!;
+  pause.innerHTML = p.is_paused ? "&#9654;" : "&#10074;&#10074;";
+  pause.setAttribute("aria-label", p.is_paused ? "Resume tour" : "Pause tour");
+  pause.title = p.is_paused ? "Resume tour (Space)" : "Pause tour (Space)";
+  if (p.is_paused || p.state === "Paused") {
+    status.textContent = "PAUSED";
+    status.classList.remove("maximized");
+    if (p.active_title) title.textContent = p.active_title;
+  } else if (p.state === "GridView") {
+    status.textContent = "GRID VIEW";
+    status.classList.remove("maximized");
+    title.textContent = "Ambient Overview";
+  } else if (p.state === "MaximizedSingleSite" || p.state === "Maximizing") {
+    status.textContent = "MAXIMIZED";
+    status.classList.add("maximized");
+    title.textContent = p.active_title || `Site #${(p.active_index ?? 0) + 1}`;
+  } else if (p.state === "PreparingNext") {
+    status.textContent = "PREPARING";
+    status.classList.remove("maximized");
+    title.textContent = `Pre-refreshing ${p.active_title || "next site"}...`;
+  }
+  document.getElementById("hud-progress-bar")!.style.width = `${Math.min(100, Math.max(0, p.progress_percent))}%`;
+}
+
 export function bootstrapApp() {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     return;
@@ -291,9 +319,6 @@ if (typeof window !== "undefined") {
 
 function initHudWindow() {
   const hudOverlay = document.getElementById("hud-overlay")!;
-  const hudStatus = document.getElementById("hud-status")!;
-  const hudTitle = document.getElementById("hud-title")!;
-  const hudProgressBar = document.getElementById("hud-progress-bar")!;
   const btnPrev = document.getElementById("btn-prev")!;
   const btnPause = document.getElementById("btn-pause")!;
   const btnNext = document.getElementById("btn-next")!;
@@ -520,23 +545,7 @@ function initHudWindow() {
   listen<TourStatusPayload>("tour-status-update", (event) => {
     const p = event.payload;
     isPaused = p.is_paused;
-    btnPause.innerHTML = isPaused ? "&#9654;" : "&#10074;&#10074;";
-
-    if (p.state === "GridView") {
-      hudStatus.textContent = "GRID VIEW";
-      hudStatus.classList.remove("maximized");
-      hudTitle.textContent = "Ambient Overview";
-    } else if (p.state === "MaximizedSingleSite" || p.state === "Maximizing") {
-      hudStatus.textContent = "MAXIMIZED";
-      hudStatus.classList.add("maximized");
-      hudTitle.textContent = p.active_title || `Site #${(p.active_index ?? 0) + 1}`;
-    } else if (p.state === "PreparingNext") {
-      hudStatus.textContent = "PREPARING";
-      hudStatus.classList.remove("maximized");
-      hudTitle.textContent = `Pre-refreshing ${p.active_title || "next site"}...`;
-    }
-
-    hudProgressBar.style.width = `${Math.min(100, Math.max(0, p.progress_percent))}%`;
+    renderTourStatus(p);
   });
 
   // Listen to native cursor tracking visibility event from backend
